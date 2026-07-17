@@ -101,7 +101,7 @@ message_boxes_try_recv :: proc(mbs: ^MessageBoxes, $T: typeid) -> (m: Message(T)
 // API utilities ///////////////////////////////////////////////////////////////
 
 @(private)
-get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, index: int) -> ^Thread_Data {
+get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, index: int) -> ^Thread_Ctx {
     if index < 0 || index >= ctx.thread_count {
         panic("the target thread does not exist")
     }
@@ -122,7 +122,7 @@ get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, i
 // globally if the given thread index is negative.
 //
 @(private)
-send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content: $T) {
+send_message_parallel_ctx :: proc(ctx: Ctx, thread_index: int, content: $T) {
     shared_ctx := get_local_ctx(ctx).shared_ctx
     if thread_index >= 0 {
         // local send
@@ -130,7 +130,7 @@ send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content:
         message_boxes_send(&receiver_data.message_boxes, Message(T){get_thread_index(ctx), content})
     } else {
         // global send
-        receiver_data := &ctx.line.threads[~thread_index]
+        receiver_data := &ctx.global_ctx.thread_ctxs[~thread_index]
         message_boxes_send(&receiver_data.message_boxes, Message(T){~get_thread_id(ctx), content})
     }
 }
@@ -141,7 +141,7 @@ send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content:
 // thread id allowing for a global response.
 //
 @(private)
-send_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, content: $T) {
+send_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, content: $T) {
     assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
     assert(thread_index >= 0)
     receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
@@ -149,13 +149,13 @@ send_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thre
 }
 
 @(private)
-recv_message :: proc(ctx: Parallel_Ctx, $T: typeid) -> (T, int) {
-    msg := message_boxes_recv(&ctx.thread_data.message_boxes, T)
+recv_message :: proc(ctx: Ctx, $T: typeid) -> (T, int) {
+    msg := message_boxes_recv(&ctx.thread_ctx.message_boxes, T)
     return msg.content, msg.sender_index
 }
 
 @(private)
-try_recv_message :: proc(ctx: Parallel_Ctx, $T: typeid) -> (T, int, bool) {
+try_recv_message :: proc(ctx: Ctx, $T: typeid) -> (T, int, bool) {
     msg, ok := message_boxes_try_recv(&ctx.thread_data.message_boxes, T)
     if !ok do return {}, 0, false
     return msg.content, msg.sender_index, true
@@ -165,7 +165,7 @@ try_recv_message :: proc(ctx: Parallel_Ctx, $T: typeid) -> (T, int, bool) {
 // Put a message in the message box of the current branch context.
 //
 @(private)
-put_message_parallel_ctx :: proc(ctx: Parallel_Ctx, content: $T) {
+put_message_parallel_ctx :: proc(ctx: Ctx, content: $T) {
     message_boxes_send(&get_local_ctx(ctx).shared_ctx.message_boxes, Message(T){get_thread_index(ctx), content})
 }
 
@@ -173,19 +173,19 @@ put_message_parallel_ctx :: proc(ctx: Parallel_Ctx, content: $T) {
 // Put a message in the message box of another branch context.
 //
 @(private)
-put_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, content: $T) {
+put_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, content: $T) {
     assert(get_local_ctx(ctx).shared_ctx != shared_ctx)
     message_boxes_send(&shared_ctx.message_boxes, Message(T){~get_thread_id(ctx), content})
 }
 
 @(private)
-get_message :: proc(ctx: Parallel_Ctx, $T: typeid) -> (T, int) {
+get_message :: proc(ctx: Ctx, $T: typeid) -> (T, int) {
     msg := message_boxes_recv(&get_local_ctx(ctx).shared_ctx.message_boxes, T)
     return msg.content, msg.sender_index
 }
 
 @(private)
-try_get_message :: proc(ctx: Parallel_Ctx, $T: typeid) -> (T, int, bool) {
+try_get_message :: proc(ctx: Ctx, $T: typeid) -> (T, int, bool) {
     msg, ok := message_boxes_try_recv(&get_local_ctx(ctx).shared_ctx.message_boxes, T)
     if !ok do return {}, 0, false
     return msg.content, msg.sender_index, true
