@@ -2,7 +2,7 @@
 .PHONY: run
 
 prog:
-	odin build . -out:$@ -debug
+	odin build ./tests/playground/ -out:$@ -debug
 
 run:
-	odin run . -debug
+	odin run ./tests/playground/ -debug
