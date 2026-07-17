@@ -6,7 +6,7 @@ import "../../"
 exec_branch :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), i)
 
-    if imp.branch(ctx, 2) {
+    if imp.branch(ctx, imp.get_thread_count(ctx) / 2) {
         fmt.printfln("branch0(1, 2)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
     } else {
         fmt.printfln("branch1(1, 2)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
@@ -19,11 +19,11 @@ exec_branch :: proc(ctx: imp.Ctx, i: int) {
 exec_nested_branches :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), i)
 
-    if imp.branch(ctx, 2) {
+    if imp.branch(ctx, imp.get_thread_count(ctx) / 2) {
         fmt.printfln("branch0(1, 2)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
     } else {
         fmt.printfln("branch1(1, 2)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
-        if imp.branch(ctx, 1) {
+        if imp.branch(ctx, imp.get_thread_count(ctx) / 2) {
             fmt.printfln("branch0(3, 4)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
         } else {
             fmt.printfln("branch1(3, 4)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
@@ -101,13 +101,13 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
 run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I) {
     fmt.println("--------------")
     ctx: imp.Global_Ctx
-    imp.global_ctx_init(&ctx, 4)
+    imp.global_ctx_init(&ctx, thread_count)
     defer imp.global_ctx_destroy(&ctx)
     imp.lauch(&ctx, exec, data)
 }
 
 main :: proc() {
-    run_test(4, exec_branch, 1)
-    run_test(4, exec_nested_branches, 2)
+    run_test(40, exec_branch, 1)
+    run_test(40, exec_nested_branches, 2)
     run_test(4, exec_messages, 3)
 }
