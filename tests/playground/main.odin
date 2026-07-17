@@ -3,7 +3,7 @@ package playground
 import "core:fmt"
 import "../../"
 
-exec_branch :: proc(ctx: imp.Parallel_Ctx, i: int) {
+exec_branch :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), i)
 
     if imp.branch(ctx, 2) {
@@ -16,7 +16,7 @@ exec_branch :: proc(ctx: imp.Parallel_Ctx, i: int) {
     fmt.printfln("[{}/{}] done", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
 }
 
-exec_nested_branches :: proc(ctx: imp.Parallel_Ctx, i: int) {
+exec_nested_branches :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), i)
 
     if imp.branch(ctx, 2) {
@@ -35,7 +35,7 @@ exec_nested_branches :: proc(ctx: imp.Parallel_Ctx, i: int) {
     fmt.printfln("[{}/{}] done", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
 }
 
-exec_messages :: proc(ctx: imp.Parallel_Ctx, i: int) {
+exec_messages :: proc(ctx: imp.Ctx, i: int) {
     ensure(imp.get_thread_count(ctx) == 4)
     buf0: [2][100]u8
     buf1: [2][100]u8
@@ -98,11 +98,12 @@ exec_messages :: proc(ctx: imp.Parallel_Ctx, i: int) {
     imp.barrier(ctx)
 }
 
-run_test :: proc(thread_count: int, exec: proc(ctx: imp.Parallel_Ctx, data: $I), data: I) {
+run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I) {
     fmt.println("--------------")
-    line: imp.Parallel_Line
-    imp.parallel_line_init(&line, thread_count, exec, data)
-    defer imp.parallel_line_destroy(&line)
+    ctx: imp.Global_Ctx
+    imp.global_ctx_init(&ctx, 4)
+    defer imp.global_ctx_destroy(&ctx)
+    imp.lauch(&ctx, exec, data)
 }
 
 main :: proc() {
