@@ -41,14 +41,14 @@ Shared_Ctx :: struct {
     parent: ^Shared_Ctx,
     thread_count: int,
     thread_index_map: [dynamic]^Thread_Data, // map local index to thread data (used by recv/send API)
-    barrier: sync.Barrier,
+    barrier: Barrier,
     message_boxes: MessageBoxes,
     mutex: sync.Mutex,
     cond: sync.Cond,
 }
 
 shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count: int) {
-    sync.barrier_init(&ctx.barrier, thread_count)
+    barrier_init(&ctx.barrier, thread_count)
 }
 
 Local_Ctx :: struct {
@@ -120,7 +120,7 @@ parallel_line_init :: proc(line: ^Parallel_Line, thread_count: int, exec: proc(c
     // Setup Root Context
     line.root_ctx = new(Shared_Ctx, allocator)
     line.root_ctx.thread_count = thread_count
-    sync.barrier_init(&line.root_ctx.barrier, thread_count)
+    barrier_init(&line.root_ctx.barrier, thread_count)
     message_boxes_init(&line.root_ctx.message_boxes)
 
     line.shared_ctx_free_list = nil
@@ -170,8 +170,8 @@ get_thread_count :: proc(ctx: Parallel_Ctx) -> int {
 
 // barrier /////////////////////////////
 
-barrier :: proc(ctx: Parallel_Ctx) {
-    sync.barrier_wait(&get_local_ctx(ctx).shared_ctx.barrier)
+barrier :: proc(ctx: Parallel_Ctx, kind := BarrierKind.Lock) {
+    barrier_wait(&get_local_ctx(ctx).shared_ctx.barrier, kind)
 }
 
 // branch //////////////////////////////

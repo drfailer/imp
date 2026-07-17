@@ -1,6 +1,50 @@
 package imp
 
 import "core:sync"
+import "base:intrinsics"
+
+// Barriers ////////////////////////////////////////////////////////////////////
+
+SpinBarrier :: struct #align(64) {
+    counter: int,
+    generation: int,
+}
+
+spin_barrier_wait :: proc(barrier: ^SpinBarrier, count: int) {
+    gen := sync.atomic_load(&barrier.generation)
+    if sync.atomic_add(&barrier.counter, 1) == count - 1 {
+        sync.atomic_sub(&barrier.counter, count)
+        sync.atomic_add(&barrier.generation, 1)
+        return
+    }
+    for sync.atomic_load(&barrier.generation) == gen {
+        intrinsics.cpu_relax()
+    }
+}
+
+BarrierKind :: enum {
+    Lock,
+    Spin,
+}
+
+Barrier :: struct {
+    lock: sync.Barrier,
+    spin: SpinBarrier,
+    thread_count: int,
+}
+
+// we assume that this function is called by a single thread
+barrier_init :: proc(barrier: ^Barrier, thread_count: int) {
+    barrier.thread_count = thread_count
+    sync.barrier_init(&barrier.lock, thread_count)
+}
+
+barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Lock) {
+    switch kind {
+    case .Lock: sync.barrier_wait(&barrier.lock)
+    case .Spin: spin_barrier_wait(&barrier.spin, barrier.thread_count)
+    }
+}
 
 // Job /////////////////////////////////////////////////////////////////////////
 
