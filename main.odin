@@ -45,55 +45,51 @@ exec_messages :: proc(ctx: Parallel_Ctx, i: int) {
         ensure(get_thread_count(ctx) == 2)
 
         text := fmt.bprintf(buf0[get_thread_index(ctx)][:], "branch 1 thread {}", get_thread_index(ctx))
-        send_message(ctx, 1 - get_thread_index(ctx), make_data(&text))
-        send_message(ctx, branch_ctx[1], get_thread_index(ctx), make_data(&text))
+        send_data(ctx, 1 - get_thread_index(ctx), make_data(&text))
+        send_data(ctx, branch_ctx[1], get_thread_index(ctx), make_data(&text))
 
         for i in 0..<2 {
-            received_msg := recv_message(ctx)
-            received_data := received_msg.content.(Data)
-            if received_msg.sender_index >= 0 {
+            data, sender := recv_data(ctx)
+            if sender >= 0 {
                 fmt.printfln("branch0[{}/{}]: {} (local from {})",
                     get_thread_index(ctx) + 1, get_thread_count(ctx),
-                    data_ptr(received_data, string)^, received_msg.sender_index)
+                    data_ptr(data, string)^, sender)
             } else {
                 fmt.printfln("branch0[{}/{}]: {} (remote from {})",
                     get_thread_index(ctx) + 1, get_thread_count(ctx),
-                    data_ptr(received_data, string)^, ~received_msg.sender_index)
-                send_message(ctx, received_msg.sender_index, make_data(&text))
+                    data_ptr(data, string)^, ~sender)
+                send_data(ctx, sender, make_data(&text))
             }
         }
-        new_msg := recv_message(ctx)
-        new_data := new_msg.content.(Data)
+        data, sender := recv_data(ctx)
         fmt.printfln("branch0[{}/{}]: {} (global from {})",
             get_thread_index(ctx) + 1, get_thread_count(ctx),
-            data_ptr(new_data, string)^, ~new_msg.sender_index)
+            data_ptr(data, string)^, ~sender)
         barrier(ctx)
     } else {
         ensure(get_thread_count(ctx) == 2)
 
         text := fmt.bprintf(buf1[get_thread_index(ctx)][:], "branch 2 thread {}", get_thread_index(ctx))
-        send_message(ctx, 1 - get_thread_index(ctx), make_data(&text))
-        send_message(ctx, branch_ctx[0], get_thread_index(ctx), make_data(&text))
+        send_data(ctx, 1 - get_thread_index(ctx), make_data(&text))
+        send_data(ctx, branch_ctx[0], get_thread_index(ctx), make_data(&text))
 
         for _ in 0..<2 {
-            received_msg := recv_message(ctx)
-            received_data := received_msg.content.(Data)
-            if received_msg.sender_index >= 0 {
+            data, sender := recv_data(ctx)
+            if sender >= 0 {
                 fmt.printfln("branch1[{}/{}]: {} (local from {})",
                     get_thread_index(ctx) + 1, get_thread_count(ctx),
-                    data_ptr(received_data, string)^, received_msg.sender_index)
+                    data_ptr(data, string)^, sender)
             } else {
                 fmt.printfln("branch1[{}/{}]: {} (remote from {})",
                     get_thread_index(ctx) + 1, get_thread_count(ctx),
-                    data_ptr(received_data, string)^, ~received_msg.sender_index)
-                send_message(ctx, received_msg.sender_index, make_data(&text))
+                    data_ptr(data, string)^, ~sender)
+                send_data(ctx, sender, make_data(&text))
             }
         }
-        new_msg := recv_message(ctx)
-        new_data := new_msg.content.(Data)
+        data, sender := recv_data(ctx)
         fmt.printfln("branch1[{}/{}]: {} (global from {})",
             get_thread_index(ctx) + 1, get_thread_count(ctx),
-            data_ptr(new_data, string)^, ~new_msg.sender_index)
+            data_ptr(data, string)^, ~sender)
         barrier(ctx)
     }
     join(ctx)

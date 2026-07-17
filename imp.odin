@@ -100,56 +100,6 @@ make_data :: proc(ptr: ^$T) -> Data {
     return Data{T, ptr}
 }
 
-// Messages ////////////////////////////////////////////////////////////////////
-
-MessageContent :: union {
-    Data,
-    ^Job,
-}
-
-Message :: struct {
-    sender_index: int,
-    content: MessageContent,
-}
-
-MessageBox :: struct {
-    queue: LockQueue(Message),
-    cond: sync.Cond,
-    mutex: sync.Mutex,
-}
-
-message_box_init :: proc(mb: ^MessageBox) {
-    queue_init(&mb.queue)
-}
-
-message_box_destroy :: proc(mb: ^MessageBox) {
-    queue_destroy(&mb.queue)
-}
-
-message_box_send :: proc(mb: ^MessageBox, m: Message) {
-    queue_push(&mb.queue, m)
-    sync.cond_signal(&mb.cond)
-}
-
-message_box_recv :: proc(mb: ^MessageBox) -> Message {
-    sync.lock(&mb.mutex)
-    defer sync.unlock(&mb.mutex)
-    for {
-        if m, ok := queue_pop(&mb.queue); ok {
-            return m
-        }
-        sync.cond_wait(&mb.cond, &mb.mutex)
-    }
-}
-
-message_box_try_recv :: proc(mb: ^MessageBox) -> (m: Message, received: bool) {
-    return queue_pop(&mb.queue)
-}
-
-message_box_get_size :: proc(mb: ^MessageBox) -> int {
-    return queue_size(&mb.queue)
-}
-
 // Contexts ////////////////////////////////////////////////////////////////////
 
 SENTINEL_CTX :: cast(^Shared_Ctx)uintptr(0xDEADBEEF)
@@ -166,7 +116,7 @@ Shared_Ctx :: struct {
     thread_count: int,
     thread_index_map: [dynamic]^Thread_Data, // map local index to thread data (used by recv/send API)
     barrier: sync.Barrier,
-    message_box: MessageBox,
+    message_boxes: MessageBoxes,
     mutex: sync.Mutex,
     cond: sync.Cond,
 }
@@ -196,7 +146,7 @@ get_local_ctx :: proc(ctx: Parallel_Ctx) -> ^Local_Ctx {
 Thread_Data :: struct {
     id: int,
     thread: ^thread.Thread,
-    message_box: MessageBox,
+    message_boxes: MessageBoxes,
     context_stack: [dynamic]Local_Ctx,
 }
 
@@ -220,7 +170,7 @@ pop_free_ctx :: proc(line: ^Parallel_Line) -> ^Shared_Ctx {
     }
     allocator := mem.dynamic_arena_allocator(&line.arena)
     ctx := new(Shared_Ctx, allocator)
-    message_box_init(&ctx.message_box)
+    message_boxes_init(&ctx.message_boxes)
     return ctx
 }
 
@@ -245,7 +195,7 @@ parallel_line_init :: proc(line: ^Parallel_Line, thread_count: int, exec: proc(c
     line.root_ctx = new(Shared_Ctx, allocator)
     line.root_ctx.thread_count = thread_count
     sync.barrier_init(&line.root_ctx.barrier, thread_count)
-    message_box_init(&line.root_ctx.message_box)
+    message_boxes_init(&line.root_ctx.message_boxes)
 
     line.shared_ctx_free_list = nil
 
@@ -263,13 +213,13 @@ parallel_line_destroy :: proc(line: ^Parallel_Line) {
     for &td in line.threads {
         thread.join(td.thread)
         thread.destroy(td.thread)
-        message_box_destroy(&td.message_box)
+        message_boxes_destroy(&td.message_boxes)
     }
-    message_box_destroy(&line.root_ctx.message_box)
+    message_boxes_destroy(&line.root_ctx.message_boxes)
     curr := line.shared_ctx_free_list
     for curr != nil {
         delete(curr.thread_index_map)
-        message_box_destroy(&curr.message_box)
+        message_boxes_destroy(&curr.message_boxes)
         curr = curr.parent
     }
     mem.dynamic_arena_destroy(&line.arena)
@@ -444,89 +394,78 @@ join :: proc(ctx: Parallel_Ctx) {
 // as identifier and make it negative so that the receiver can know.
 //
 
-@(private)
-get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, index: int) -> ^Thread_Data {
-    if index < 0 || index >= ctx.thread_count {
-        panic("the target thread does not exist")
-    }
+// data ///////////
 
-    // threads going into a branch do not wait for the other threads so we need
-    // to wait for the thread_data to be available if the initialization is not
-    // done yet (most of the time, thread won't wait).
-    for {
-        thread_data := sync.atomic_load_explicit(&ctx.thread_index_map[index], .Acquire)
-        if thread_data != nil do return thread_data
-        intrinsics.cpu_relax()
-    }
-    panic("unreachable")
+send_data_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, data: Data) {
+    send_message_parallel_ctx(ctx, thread_index, data)
 }
 
-//
-// Sends a message either to another in the local branch, or to another thread
-// globally if the given thread index is negative.
-//
-send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content: MessageContent) {
-    shared_ctx := get_local_ctx(ctx).shared_ctx
-    if thread_index >= 0 {
-        // local send
-        receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
-        message_box_send(&receiver_data.message_box, Message{get_thread_index(ctx), content})
-    } else {
-        // global send
-        receiver_data := &ctx.line.threads[~thread_index]
-        message_box_send(&receiver_data.message_box, Message{~get_thread_id(ctx), content})
-    }
+send_data_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data) {
+    send_message_shared_ctx(ctx, shared_ctx, thread_index, data)
 }
 
-//
-// Sends a message to a thread in another branch (using its local index within
-// the banch context), The receiver will receive a message with a negative
-// thread id allowing for a global response.
-//
-send_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, content: MessageContent) {
-    assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
-    assert(thread_index >= 0)
-    receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
-    message_box_send(&receiver_data.message_box, Message{~get_thread_id(ctx), content})
+send_data :: proc{ send_data_parallel_ctx, send_data_shared_ctx }
+
+recv_data :: proc(ctx: Parallel_Ctx) -> (Data, int) {
+    return recv_message(ctx, Data)
 }
 
-send_message :: proc{
-    send_message_shared_ctx,
-    send_message_parallel_ctx,
+try_recv_data :: proc(ctx: Parallel_Ctx) -> (Data, int, bool) {
+    return try_get_message(ctx, Data)
 }
 
-recv_message :: proc(ctx: Parallel_Ctx) -> Message {
-    return message_box_recv(&ctx.thread_data.message_box)
+put_data_parallel_ctx :: proc(ctx: Parallel_Ctx, data: Data) {
+    put_message_parallel_ctx(ctx, data)
 }
 
-try_recv_message :: proc(ctx: Parallel_Ctx) -> (Message, bool) {
-    return message_box_try_recv(&ctx.thread_data.message_box)
+put_data_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, data: Data) {
+    put_message_shared_ctx(ctx, shared_ctx, data)
 }
 
-//
-// Put a message in the message box of the current branch context.
-//
-put_message_parallel_ctx :: proc(ctx: Parallel_Ctx, content: MessageContent) {
-    message_box_send(&get_local_ctx(ctx).shared_ctx.message_box, Message{get_thread_index(ctx), content})
+put_data :: proc{ put_data_parallel_ctx, put_data_shared_ctx }
+
+get_data :: proc(ctx: Parallel_Ctx) -> (Data, int) {
+    return get_message(ctx, Data)
 }
 
-//
-// Put a message in the message box of another branch context.
-//
-put_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, content: MessageContent) {
-    assert(get_local_ctx(ctx).shared_ctx != shared_ctx)
-    message_box_send(&shared_ctx.message_box, Message{~get_thread_id(ctx), content})
+try_get_data :: proc(ctx: Parallel_Ctx) -> (Data, int, bool) {
+    return try_get_message(ctx, Data)
 }
 
-put_message :: proc{
-    put_message_parallel_ctx,
-    put_message_shared_ctx,
+// job ////////////
+
+send_job_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, job: ^Job) {
+    send_message_parallel_ctx(ctx, thread_index, job)
 }
 
-get_message :: proc(ctx: Parallel_Ctx) -> Message {
-    return message_box_recv(&get_local_ctx(ctx).shared_ctx.message_box)
+send_job_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, job: ^Job) {
+    send_message_shared_ctx(ctx, shared_ctx, thread_index, job)
 }
 
-try_get_message :: proc(ctx: Parallel_Ctx) -> (Message, bool) {
-    return message_box_try_recv(&get_local_ctx(ctx).shared_ctx.message_box)
+send_job :: proc{ send_job_parallel_ctx, send_job_shared_ctx }
+
+recv_job :: proc(ctx: Parallel_Ctx) -> (^Job, int) {
+    return recv_message(ctx, ^Job)
+}
+
+try_recv_job :: proc(ctx: Parallel_Ctx) -> (^Job, int, bool) {
+    return try_get_message(ctx, ^Job)
+}
+
+put_job_parallel_ctx :: proc(ctx: Parallel_Ctx, job: ^Job) {
+    put_message_parallel_ctx(ctx, job)
+}
+
+put_job_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, job: ^Job) {
+    put_message_shared_ctx(ctx, shared_ctx, job)
+}
+
+put_job :: proc{ put_job_parallel_ctx, put_job_shared_ctx }
+
+get_job :: proc(ctx: Parallel_Ctx) -> (^Job, int) {
+    return get_message(ctx, ^Job)
+}
+
+try_get_job :: proc(ctx: Parallel_Ctx) -> (^Job, int, bool) {
+    return try_get_message(ctx, ^Job)
 }
