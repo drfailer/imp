@@ -187,7 +187,7 @@ Parallel_Ctx :: struct {
 }
 
 @(private)
-get_local_context :: proc(ctx: Parallel_Ctx) -> ^Local_Ctx {
+get_local_ctx :: proc(ctx: Parallel_Ctx) -> ^Local_Ctx {
     return &ctx.thread_data.context_stack[len(ctx.thread_data.context_stack) - 1]
 }
 
@@ -280,7 +280,7 @@ parallel_line_destroy :: proc(line: ^Parallel_Line) {
 // accessors ///////////////////////////
 
 get_thread_index :: proc(ctx: Parallel_Ctx) -> int {
-    return get_local_context(ctx).thread_index
+    return get_local_ctx(ctx).thread_index
 }
 
 get_thread_id :: proc(ctx: Parallel_Ctx) -> int {
@@ -289,13 +289,13 @@ get_thread_id :: proc(ctx: Parallel_Ctx) -> int {
 
 
 get_thread_count :: proc(ctx: Parallel_Ctx) -> int {
-    return get_local_context(ctx).shared_ctx.thread_count
+    return get_local_ctx(ctx).shared_ctx.thread_count
 }
 
 // barrier /////////////////////////////
 
 barrier :: proc(ctx: Parallel_Ctx) {
-    sync.barrier_wait(&get_local_context(ctx).shared_ctx.barrier)
+    sync.barrier_wait(&get_local_ctx(ctx).shared_ctx.barrier)
 }
 
 // branch //////////////////////////////
@@ -303,7 +303,7 @@ barrier :: proc(ctx: Parallel_Ctx) {
 Branch_Ctx :: distinct [2]^Shared_Ctx
 
 branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bool {
-    parent_local := get_local_context(ctx)
+    parent_local := get_local_ctx(ctx)
     parent_ctx := parent_local.shared_ctx
 
     // The exact generation we need for THIS branch at THIS nesting level
@@ -419,7 +419,7 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^Branch_C
 }
 
 join :: proc(ctx: Parallel_Ctx) {
-    cur_ctx := get_local_context(ctx).shared_ctx
+    cur_ctx := get_local_ctx(ctx).shared_ctx
     prev_count := sync.atomic_sub_explicit(&cur_ctx.branch.fini_counter, 1, .Relaxed)
     if prev_count == 1 {
         push_free_ctx(ctx.line, cur_ctx)
@@ -466,7 +466,7 @@ get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, i
 // globally if the given thread index is negative.
 //
 send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content: MessageContent) {
-    shared_ctx := get_local_context(ctx).shared_ctx
+    shared_ctx := get_local_ctx(ctx).shared_ctx
     if thread_index >= 0 {
         // local send
         receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
@@ -484,7 +484,7 @@ send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content:
 // thread id allowing for a global response.
 //
 send_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, content: MessageContent) {
-    assert(shared_ctx != get_local_context(ctx).shared_ctx)
+    assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
     assert(thread_index >= 0)
     receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
     message_box_send(&receiver_data.message_box, Message{~get_thread_id(ctx), content})
@@ -507,14 +507,14 @@ try_recv_message :: proc(ctx: Parallel_Ctx) -> (Message, bool) {
 // Put a message in the message box of the current branch context.
 //
 put_message_parallel_ctx :: proc(ctx: Parallel_Ctx, content: MessageContent) {
-    message_box_send(&get_local_context(ctx).shared_ctx.message_box, Message{get_thread_index(ctx), content})
+    message_box_send(&get_local_ctx(ctx).shared_ctx.message_box, Message{get_thread_index(ctx), content})
 }
 
 //
 // Put a message in the message box of another branch context.
 //
 put_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, content: MessageContent) {
-    assert(get_local_context(ctx).shared_ctx != shared_ctx)
+    assert(get_local_ctx(ctx).shared_ctx != shared_ctx)
     message_box_send(&shared_ctx.message_box, Message{~get_thread_id(ctx), content})
 }
 
@@ -524,9 +524,9 @@ put_message :: proc{
 }
 
 get_message :: proc(ctx: Parallel_Ctx) -> Message {
-    return message_box_recv(&get_local_context(ctx).shared_ctx.message_box)
+    return message_box_recv(&get_local_ctx(ctx).shared_ctx.message_box)
 }
 
 try_get_message :: proc(ctx: Parallel_Ctx) -> (Message, bool) {
-    return message_box_try_recv(&get_local_context(ctx).shared_ctx.message_box)
+    return message_box_try_recv(&get_local_ctx(ctx).shared_ctx.message_box)
 }
