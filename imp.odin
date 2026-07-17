@@ -3,6 +3,7 @@ package imp
 import "core:thread"
 import "core:sync"
 import "core:mem"
+import "base:intrinsics"
 import q "core:container/queue"
 import "core:fmt"
 
@@ -101,10 +102,14 @@ make_data :: proc(ptr: ^$T) -> Data {
 
 // Messages ////////////////////////////////////////////////////////////////////
 
-Message :: union {
+MessageContent :: union {
     Data,
-    ^Shared_Ctx,
     ^Job,
+}
+
+Message :: struct {
+    sender_index: int,
+    content: MessageContent,
 }
 
 MessageBox :: struct {
@@ -278,6 +283,11 @@ get_thread_index :: proc(ctx: Parallel_Ctx) -> int {
     return get_local_context(ctx).thread_index
 }
 
+get_thread_id :: proc(ctx: Parallel_Ctx) -> int {
+    return ctx.thread_data.id
+}
+
+
 get_thread_count :: proc(ctx: Parallel_Ctx) -> int {
     return get_local_context(ctx).shared_ctx.thread_count
 }
@@ -290,9 +300,9 @@ barrier :: proc(ctx: Parallel_Ctx) {
 
 // branch //////////////////////////////
 
-BranchCtx :: distinct [2]^Shared_Ctx
+Branch_Ctx :: distinct [2]^Shared_Ctx
 
-branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^BranchCtx = nil) -> bool {
+branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bool {
     parent_local := get_local_context(ctx)
     parent_ctx := parent_local.shared_ctx
 
@@ -327,8 +337,6 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^BranchCt
         {
             node0 := pop_free_ctx(ctx.line)
             node1 := pop_free_ctx(ctx.line)
-
-            if branch_ctx != nil do branch_ctx^ = {node0, node1}
 
             node0.thread_count = right_thread_count
             clear(&node0.thread_index_map)
@@ -373,6 +381,8 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^BranchCt
     ctx0 := sync.atomic_load_explicit(&parent_ctx.branch.ctxs[0], .Acquire)
     ctx1 := sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire)
 
+    if branch_ctx != nil do branch_ctx^ = {ctx0, ctx1}
+
     idx0 := sync.atomic_add_explicit(&ctx0.branch.init_counter, 1, .Relaxed)
 
     new_local: Local_Ctx
@@ -415,4 +425,108 @@ join :: proc(ctx: Parallel_Ctx) {
         push_free_ctx(ctx.line, cur_ctx)
     }
     pop(&ctx.thread_data.context_stack)
+}
+
+// messages ////////////////////////////
+
+//
+// send: send a message to another thread (use the message box from the target thread data)
+// recv: recv a message from this thread message box (we do not allow
+//       specifying the sender, the first message in the queue should be
+//       received and process in priority)
+// put: put a message in the current context message box.
+// get: get a message from the current context message box.
+//
+// try_recv & try_put are non blocking (return a bool).
+//
+// A negative thread index will be treated as a ~global thread id. When threads
+// communicate outside of the current current context, they use their thread id
+// as identifier and make it negative so that the receiver can know.
+//
+
+@(private)
+get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, index: int) -> ^Thread_Data {
+    if index < 0 || index >= ctx.thread_count {
+        panic("the target thread does not exist")
+    }
+
+    // threads going into a branch do not wait for the other threads so we need
+    // to wait for the thread_data to be available if the initialization is not
+    // done yet (most of the time, thread won't wait).
+    for {
+        thread_data := sync.atomic_load_explicit(&ctx.thread_index_map[index], .Acquire)
+        if thread_data != nil do return thread_data
+        intrinsics.cpu_relax()
+    }
+    panic("unreachable")
+}
+
+//
+// Sends a message either to another in the local branch, or to another thread
+// globally if the given thread index is negative.
+//
+send_message_parallel_ctx :: proc(ctx: Parallel_Ctx, thread_index: int, content: MessageContent) {
+    shared_ctx := get_local_context(ctx).shared_ctx
+    if thread_index >= 0 {
+        // local send
+        receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
+        message_box_send(&receiver_data.message_box, Message{get_thread_index(ctx), content})
+    } else {
+        // global send
+        receiver_data := &ctx.line.threads[~thread_index]
+        message_box_send(&receiver_data.message_box, Message{~get_thread_id(ctx), content})
+    }
+}
+
+//
+// Sends a message to a thread in another branch (using its local index within
+// the banch context), The receiver will receive a message with a negative
+// thread id allowing for a global response.
+//
+send_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, content: MessageContent) {
+    assert(shared_ctx != get_local_context(ctx).shared_ctx)
+    assert(thread_index >= 0)
+    receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
+    message_box_send(&receiver_data.message_box, Message{~get_thread_id(ctx), content})
+}
+
+send_message :: proc{
+    send_message_shared_ctx,
+    send_message_parallel_ctx,
+}
+
+recv_message :: proc(ctx: Parallel_Ctx) -> Message {
+    return message_box_recv(&ctx.thread_data.message_box)
+}
+
+try_recv_message :: proc(ctx: Parallel_Ctx) -> (Message, bool) {
+    return message_box_try_recv(&ctx.thread_data.message_box)
+}
+
+//
+// Put a message in the message box of the current branch context.
+//
+put_message_parallel_ctx :: proc(ctx: Parallel_Ctx, content: MessageContent) {
+    message_box_send(&get_local_context(ctx).shared_ctx.message_box, Message{get_thread_index(ctx), content})
+}
+
+//
+// Put a message in the message box of another branch context.
+//
+put_message_shared_ctx :: proc(ctx: Parallel_Ctx, shared_ctx: ^Shared_Ctx, content: MessageContent) {
+    assert(get_local_context(ctx).shared_ctx != shared_ctx)
+    message_box_send(&shared_ctx.message_box, Message{~get_thread_id(ctx), content})
+}
+
+put_message :: proc{
+    put_message_parallel_ctx,
+    put_message_shared_ctx,
+}
+
+get_message :: proc(ctx: Parallel_Ctx) -> Message {
+    return message_box_recv(&get_local_context(ctx).shared_ctx.message_box)
+}
+
+try_get_message :: proc(ctx: Parallel_Ctx) -> (Message, bool) {
+    return message_box_try_recv(&get_local_context(ctx).shared_ctx.message_box)
 }
