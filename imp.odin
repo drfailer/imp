@@ -29,15 +29,23 @@ job_destroy :: proc(job: ^Job) {
 }
 
 job_reset :: proc(job: ^Job, step_count := 1) {
+    sync.lock(&job.mutex)
+    defer sync.unlock(&job.mutex)
     job.steps = step_count
+    // note: the queue is not cleared, may change later
 }
 
 job_done :: proc(job: ^Job, mdata: Maybe(Data) = nil) {
-    steps := sync.atomic_sub(&job.steps, 1)
+    sync.lock(&job.mutex)
+    job.steps -= 1
+    sync.unlock(&job.mutex)
+
+    should_signal := job.steps <= 1
     if data, ok := mdata.?; ok {
         queue_push(&job.queue, data)
-        sync.cond_broadcast(&job.cond)
-    } else if steps <= 1 {
+        should_signal = true
+    }
+    if should_signal {
         sync.cond_broadcast(&job.cond)
     }
 }
@@ -64,8 +72,7 @@ job_pop_data :: proc(job: ^Job) -> (Data, bool) {
 job_wait :: proc(job: ^Job) {
     sync.lock(&job.mutex)
     defer sync.unlock(&job.mutex)
-    for {
-        if sync.atomic_load(&job.steps) <= 0 do break
+    for job.steps > 0 {
         sync.cond_wait(&job.cond, &job.mutex)
     }
 }
@@ -75,7 +82,7 @@ job_wait_data :: proc(job: ^Job) -> (data: Data, has_data: bool) {
     defer sync.unlock(&job.mutex)
     for {
         if queue_size(&job.queue) > 0 do return queue_pop(&job.queue)
-        if sync.atomic_load(&job.steps) <= 0 do break
+        if job.steps <= 0 do break
         sync.cond_wait(&job.cond, &job.mutex)
     }
     return data, false
