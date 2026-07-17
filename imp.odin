@@ -8,7 +8,6 @@ import "core:fmt"
 
 // Job /////////////////////////////////////////////////////////////////////////
 
-// FIXME: how to handle the reuse, do we need a generation counter?
 Job :: struct {
     mutex: sync.Mutex,
     cond: sync.Cond,
@@ -148,18 +147,19 @@ message_box_get_size :: proc(mb: ^MessageBox) -> int {
 
 // Contexts ////////////////////////////////////////////////////////////////////
 
-SENTINEL_CTX := cast(^Shared_Ctx)uintptr(0xDEADBEEF)
+SENTINEL_CTX :: cast(^Shared_Ctx)uintptr(0xDEADBEEF)
 
 Shared_Ctx :: struct {
     branch: struct {
-        init_counter: int,        // Slot claiming
-        fini_counter: int,        // Exit reference count
-        arrival_counter: int,     // ASAP reset counter
-        generation: int,          // Solves the fast-laps-slow hazard
-        left, right: ^Shared_Ctx, // used to shared new context with threads in left and right branch
+        init_counter: int,    // Slot claiming
+        fini_counter: int,    // Exit reference count
+        arrival_counter: int, // ASAP reset counter
+        generation: int,      // Solves the fast-laps-slow hazard
+        ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
     },
     parent: ^Shared_Ctx,
     thread_count: int,
+    thread_index_map: [dynamic]^Thread_Data, // map local index to thread data (used by recv/send API)
     barrier: sync.Barrier,
     message_box: MessageBox,
     mutex: sync.Mutex,
@@ -179,6 +179,11 @@ Local_Ctx :: struct {
 Parallel_Ctx :: struct {
     line: ^Parallel_Line,
     thread_data: ^Thread_Data,
+}
+
+@(private)
+get_local_context :: proc(ctx: Parallel_Ctx) -> ^Local_Ctx {
+    return &ctx.thread_data.context_stack[len(ctx.thread_data.context_stack) - 1]
 }
 
 // Parallel lines //////////////////////////////////////////////////////////////
@@ -216,8 +221,7 @@ pop_free_ctx :: proc(line: ^Parallel_Line) -> ^Shared_Ctx {
 
 @(private)
 push_free_ctx :: proc(line: ^Parallel_Line, ctx: ^Shared_Ctx) {
-    ctx.branch.left = nil
-    ctx.branch.right = nil
+    ctx.branch.ctxs = {nil, nil}
     ctx.branch.arrival_counter = 0
 
     sync.mutex_lock(&line.mutex)
@@ -259,6 +263,7 @@ parallel_line_destroy :: proc(line: ^Parallel_Line) {
     message_box_destroy(&line.root_ctx.message_box)
     curr := line.shared_ctx_free_list
     for curr != nil {
+        delete(curr.thread_index_map)
         message_box_destroy(&curr.message_box)
         curr = curr.parent
     }
@@ -267,10 +272,7 @@ parallel_line_destroy :: proc(line: ^Parallel_Line) {
 
 // Parallel API ////////////////////////////////////////////////////////////////
 
-@(private)
-get_local_context :: proc(ctx: Parallel_Ctx) -> ^Local_Ctx {
-    return &ctx.thread_data.context_stack[len(ctx.thread_data.context_stack) - 1]
-}
+// accessors ///////////////////////////
 
 get_thread_index :: proc(ctx: Parallel_Ctx) -> int {
     return get_local_context(ctx).thread_index
@@ -280,11 +282,17 @@ get_thread_count :: proc(ctx: Parallel_Ctx) -> int {
     return get_local_context(ctx).shared_ctx.thread_count
 }
 
+// barrier /////////////////////////////
+
 barrier :: proc(ctx: Parallel_Ctx) {
     sync.barrier_wait(&get_local_context(ctx).shared_ctx.barrier)
 }
 
-branch :: proc(ctx: Parallel_Ctx, right_thread_count: int) -> bool {
+// branch //////////////////////////////
+
+BranchCtx :: distinct [2]^Shared_Ctx
+
+branch :: proc(ctx: Parallel_Ctx, right_thread_count: int, branch_ctx: ^BranchCtx = nil) -> bool {
     parent_local := get_local_context(ctx)
     parent_ctx := parent_local.shared_ctx
 
@@ -297,11 +305,11 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int) -> bool {
     // the previous branch hasn't finished its ASAP reset yet.
     // =========================================================================
     if sync.atomic_load_explicit(&parent_ctx.branch.generation, .Acquire) < my_expected_gen &&
-       sync.atomic_load_explicit(&parent_ctx.branch.left, .Acquire) != nil
+       sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire) != nil
     {
         sync.mutex_lock(&parent_ctx.mutex)
         for sync.atomic_load_explicit(&parent_ctx.branch.generation, .Acquire) < my_expected_gen &&
-            sync.atomic_load_explicit(&parent_ctx.branch.left, .Acquire) != nil
+            sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire) != nil
         {
             sync.cond_wait(&parent_ctx.cond, &parent_ctx.mutex)
         }
@@ -314,26 +322,32 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int) -> bool {
     if sync.atomic_load_explicit(&parent_ctx.branch.generation, .Acquire) < my_expected_gen {
         expected: ^Shared_Ctx = nil
         if _, ok := sync.atomic_compare_exchange_strong_explicit(
-            &parent_ctx.branch.left, expected, SENTINEL_CTX,
+            &parent_ctx.branch.ctxs[1], expected, SENTINEL_CTX,
             .Acquire, .Acquire); ok
         {
-            left_node := pop_free_ctx(ctx.line)
-            right_node := pop_free_ctx(ctx.line)
+            node0 := pop_free_ctx(ctx.line)
+            node1 := pop_free_ctx(ctx.line)
 
-            left_node.thread_count = parent_ctx.thread_count - right_thread_count
-            sync.atomic_store_explicit(&left_node.branch.init_counter, 0, .Relaxed)
-            sync.atomic_store_explicit(&left_node.branch.fini_counter, left_node.thread_count, .Relaxed)
-            left_node.parent = parent_ctx
+            if branch_ctx != nil do branch_ctx^ = {node0, node1}
 
-            right_node.thread_count = right_thread_count
-            sync.atomic_store_explicit(&right_node.branch.init_counter, 0, .Relaxed)
-            sync.atomic_store_explicit(&right_node.branch.fini_counter, right_node.thread_count, .Relaxed)
-            right_node.parent = parent_ctx
+            node0.thread_count = right_thread_count
+            clear(&node0.thread_index_map)
+            resize(&node0.thread_index_map, node0.thread_count)
+            node0.branch.init_counter = 0
+            node0.branch.fini_counter = node0.thread_count
+            node0.parent = parent_ctx
+
+            node1.thread_count = parent_ctx.thread_count - right_thread_count
+            clear(&node1.thread_index_map)
+            resize(&node1.thread_index_map, node1.thread_count)
+            node1.branch.init_counter = 0
+            node1.branch.fini_counter = node1.thread_count
+            node1.parent = parent_ctx
 
             // Protect state mutation to prevent lost wakeups for Loop 2
             sync.mutex_lock(&parent_ctx.mutex)
-            sync.atomic_store_explicit(&parent_ctx.branch.right, right_node, .Release)
-            sync.atomic_store_explicit(&parent_ctx.branch.left, left_node, .Release)
+            sync.atomic_store_explicit(&parent_ctx.branch.ctxs[0], node0, .Release)
+            sync.atomic_store_explicit(&parent_ctx.branch.ctxs[1], node1, .Release)
             // Bump generation LAST to signal readiness
             sync.atomic_store_explicit(&parent_ctx.branch.generation, my_expected_gen, .Release)
             sync.mutex_unlock(&parent_ctx.mutex)
@@ -356,18 +370,20 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int) -> bool {
     // =========================================================================
     // CLAIM: Slots and prepare local context
     // =========================================================================
-    right_ctx := sync.atomic_load_explicit(&parent_ctx.branch.right, .Acquire)
-    left_ctx := sync.atomic_load_explicit(&parent_ctx.branch.left, .Acquire)
+    ctx0 := sync.atomic_load_explicit(&parent_ctx.branch.ctxs[0], .Acquire)
+    ctx1 := sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire)
 
-    idx := sync.atomic_add_explicit(&right_ctx.branch.init_counter, 1, .Relaxed)
+    idx0 := sync.atomic_add_explicit(&ctx0.branch.init_counter, 1, .Relaxed)
 
     new_local: Local_Ctx
-    if idx < right_ctx.thread_count {
+    if idx0 < ctx0.thread_count {
         // Fresh generation for the nested scope
-        new_local = Local_Ctx{ shared_ctx = right_ctx, thread_index = idx, branch_generation = 0 }
+        new_local = Local_Ctx{ shared_ctx = ctx0, thread_index = idx0, branch_generation = 0 }
+        sync.atomic_store_explicit(&ctx0.thread_index_map[idx0], ctx.thread_data, .Release)
     } else {
-        idx_left := sync.atomic_add_explicit(&left_ctx.branch.init_counter, 1, .Relaxed)
-        new_local = Local_Ctx{ shared_ctx = left_ctx, thread_index = idx_left, branch_generation = 0 }
+        idx1 := sync.atomic_add_explicit(&ctx1.branch.init_counter, 1, .Relaxed)
+        new_local = Local_Ctx{ shared_ctx = ctx1, thread_index = idx1, branch_generation = 0 }
+        sync.atomic_store_explicit(&ctx1.thread_index_map[idx1], ctx.thread_data, .Release)
     }
 
     // Advance our local generation tracker for the parent context
@@ -381,15 +397,15 @@ branch :: proc(ctx: Parallel_Ctx, right_thread_count: int) -> bool {
         sync.atomic_store_explicit(&parent_ctx.branch.arrival_counter, 0, .Relaxed)
 
         sync.mutex_lock(&parent_ctx.mutex)
-        sync.atomic_store_explicit(&parent_ctx.branch.right, nil, .Release)
-        sync.atomic_store_explicit(&parent_ctx.branch.left, nil, .Release)
+        sync.atomic_store_explicit(&parent_ctx.branch.ctxs[0], nil, .Release)
+        sync.atomic_store_explicit(&parent_ctx.branch.ctxs[1], nil, .Release)
         sync.mutex_unlock(&parent_ctx.mutex)
 
         sync.cond_broadcast(&parent_ctx.cond)
     }
 
     append(&ctx.thread_data.context_stack, new_local)
-    return new_local.shared_ctx == right_ctx
+    return new_local.shared_ctx == ctx0
 }
 
 join :: proc(ctx: Parallel_Ctx) {
