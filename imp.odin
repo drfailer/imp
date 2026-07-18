@@ -105,6 +105,13 @@ thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
 //
 
 Shared_Ctx :: struct {
+    parent: ^Shared_Ctx,
+    thread_count: int,
+    cond: sync.Cond,
+    mutex: sync.Mutex,
+    thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
+    barrier: Barrier,
+    message_boxes: MessageBoxes,
     branch: struct {
         init_counter: int,    // Slot claiming
         fini_counter: int,    // Exit reference count
@@ -112,13 +119,9 @@ Shared_Ctx :: struct {
         generation: int,      // Solves the fast-laps-slow hazard
         ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
     },
-    parent: ^Shared_Ctx,
-    thread_count: int,
-    thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
-    barrier: Barrier,
-    message_boxes: MessageBoxes,
-    mutex: sync.Mutex,
-    cond: sync.Cond,
+    sync: union { // use for synchronizing values
+        u64,
+    },
 }
 
 shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count: int) {
@@ -157,6 +160,11 @@ get_local_ctx :: proc(ctx: Ctx) -> ^Local_Ctx {
     return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
 }
 
+@(private)
+get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
+    return get_local_ctx(ctx).shared_ctx
+}
+
 // Data ////////////////////////////////////////////////////////////////////////
 
 Data :: struct {
@@ -190,13 +198,30 @@ get_thread_id :: proc(ctx: Ctx) -> int {
 
 
 get_thread_count :: proc(ctx: Ctx) -> int {
-    return get_local_ctx(ctx).shared_ctx.thread_count
+    return get_shared_ctx(ctx).thread_count
 }
 
 // barrier /////////////////////////////
 
 barrier :: proc(ctx: Ctx, kind := BarrierKind.Spin) {
-    barrier_wait(&get_local_ctx(ctx).shared_ctx.barrier, kind)
+    barrier_wait(&get_shared_ctx(ctx).barrier, kind)
+}
+
+// sync values /////////////////////////
+
+sync_val64 :: proc(ctx: Ctx, val: ^$T, master_index: int) where size_of(T) == 8 {
+    shared_ctx := get_shared_ctx(ctx)
+
+    if get_thread_index(ctx) == master_index {
+        shared_ctx.sync.(u64) = val^
+    }
+    barrier(ctx, .Spin)
+    val^ = shared_ctx.sync.(u64)
+    barrier(ctx, .Spin)
+}
+
+sync_val :: proc{
+    sync_val64,
 }
 
 // branch //////////////////////////////
@@ -322,7 +347,7 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
 }
 
 join :: proc(ctx: Ctx) {
-    cur_ctx := get_local_ctx(ctx).shared_ctx
+    cur_ctx := get_shared_ctx(ctx)
     prev_count := sync.atomic_sub_explicit(&cur_ctx.branch.fini_counter, 1, .Relaxed)
     if prev_count == 1 {
         release_shared_ctx(ctx.global_ctx, cur_ctx)
