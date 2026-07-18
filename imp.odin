@@ -38,9 +38,7 @@ global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int, thread_ctx_stack_ca
     // Create Threads
     ctx.thread_ctxs = make([dynamic]Thread_Ctx, thread_count, allocator)
     for &tctx, idx in ctx.thread_ctxs {
-        tctx.id = idx
-        tctx.ctx_stack = make([dynamic]Local_Ctx, 1, thread_ctx_stack_capacity + 1, allocator)
-        tctx.ctx_stack[0] = Local_Ctx{ shared_ctx = ctx.shared.root, thread_index = idx }
+        thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, ctx.shared.root, allocator)
     }
 }
 
@@ -92,6 +90,12 @@ Thread_Ctx :: struct {
     id: int,
     message_boxes: MessageBoxes,
     ctx_stack: [dynamic]Local_Ctx,
+}
+
+thread_ctx_init :: proc(ctx: ^Thread_Ctx, index, ctx_stack_capacity: int, shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
+    ctx.id = index
+    ctx.ctx_stack = make([dynamic]Local_Ctx, 1, ctx_stack_capacity + 1, allocator)
+    ctx.ctx_stack[0] = Local_Ctx{ shared_ctx = shared_ctx, thread_index = index }
 }
 
 thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
@@ -222,6 +226,14 @@ sync_val64 :: proc(ctx: Ctx, val: ^$T, master_index: int) where size_of(T) == 8 
 
 sync_val :: proc{
     sync_val64,
+}
+
+// reduce //////////////////////////////
+
+// TODO: we will need more reduction functions depending on the situation
+
+reduce :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
+    // TODO
 }
 
 // branch //////////////////////////////
