@@ -2,22 +2,30 @@ package imp
 
 import "core:sync"
 import "base:intrinsics"
+import "core:fmt"
 
 // Barriers ////////////////////////////////////////////////////////////////////
 
 SpinBarrier :: struct #align(64) {
     counter: int,
     generation: int,
+    thread_count: int,
 }
 
-spin_barrier_wait :: proc(barrier: ^SpinBarrier, count: int) {
-    gen := sync.atomic_load(&barrier.generation)
-    if sync.atomic_add(&barrier.counter, 1) == count - 1 {
-        sync.atomic_sub(&barrier.counter, count)
-        sync.atomic_add(&barrier.generation, 1)
+spin_barrier_init :: proc(barrier: ^SpinBarrier, thread_count: int) {
+    barrier.thread_count = thread_count
+    barrier.generation = 0
+    barrier.counter = 0
+}
+
+spin_barrier_wait :: proc(barrier: ^SpinBarrier) {
+    gen := sync.atomic_load_explicit(&barrier.generation, .Acquire)
+    if sync.atomic_add_explicit(&barrier.counter, 1, .Release) == barrier.thread_count - 1 {
+        sync.atomic_store_explicit(&barrier.counter, 0, .Relaxed)
+        sync.atomic_add_explicit(&barrier.generation, 1, .Release)
         return
     }
-    for sync.atomic_load(&barrier.generation) == gen {
+    for sync.atomic_load_explicit(&barrier.generation, .Acquire) == gen {
         intrinsics.cpu_relax()
     }
 }
@@ -30,19 +38,18 @@ BarrierKind :: enum {
 Barrier :: struct {
     sleep: sync.Barrier,
     spin: SpinBarrier,
-    thread_count: int,
 }
 
 // we assume that this function is called by a single thread
 barrier_init :: proc(barrier: ^Barrier, thread_count: int) {
-    barrier.thread_count = thread_count
+    spin_barrier_init(&barrier.spin, thread_count)
     sync.barrier_init(&barrier.sleep, thread_count)
 }
 
 barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Sleep) {
     switch kind {
     case .Sleep: sync.barrier_wait(&barrier.sleep)
-    case .Spin: spin_barrier_wait(&barrier.spin, barrier.thread_count)
+    case .Spin: spin_barrier_wait(&barrier.spin)
     }
 }
 
