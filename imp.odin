@@ -195,7 +195,7 @@ get_thread_count :: proc(ctx: Ctx) -> int {
 
 // barrier /////////////////////////////
 
-barrier :: proc(ctx: Ctx, kind := BarrierKind.Lock) {
+barrier :: proc(ctx: Ctx, kind := BarrierKind.Sleep) {
     barrier_wait(&get_local_ctx(ctx).shared_ctx.barrier, kind)
 }
 

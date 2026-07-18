@@ -23,12 +23,12 @@ spin_barrier_wait :: proc(barrier: ^SpinBarrier, count: int) {
 }
 
 BarrierKind :: enum {
-    Lock,
+    Sleep,
     Spin,
 }
 
 Barrier :: struct {
-    lock: sync.Barrier,
+    sleep: sync.Barrier,
     spin: SpinBarrier,
     thread_count: int,
 }
@@ -36,12 +36,12 @@ Barrier :: struct {
 // we assume that this function is called by a single thread
 barrier_init :: proc(barrier: ^Barrier, thread_count: int) {
     barrier.thread_count = thread_count
-    sync.barrier_init(&barrier.lock, thread_count)
+    sync.barrier_init(&barrier.sleep, thread_count)
 }
 
-barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Lock) {
+barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Sleep) {
     switch kind {
-    case .Lock: sync.barrier_wait(&barrier.lock)
+    case .Sleep: sync.barrier_wait(&barrier.sleep)
     case .Spin: spin_barrier_wait(&barrier.spin, barrier.thread_count)
     }
 }
