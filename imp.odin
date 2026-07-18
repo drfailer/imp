@@ -67,7 +67,7 @@ alloc_shared_ctx :: proc(ctx: ^Global_Ctx) -> ^Shared_Ctx {
     }
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
     shared_ctx := new(Shared_Ctx, allocator)
-    message_boxes_init(&shared_ctx.message_boxes)
+    comms_init(&shared_ctx.comms)
     return shared_ctx
 }
 
@@ -88,18 +88,19 @@ release_shared_ctx :: proc(ctx: ^Global_Ctx, shared_ctx: ^Shared_Ctx) {
 
 Thread_Ctx :: struct {
     id: int,
-    message_boxes: MessageBoxes,
+    comms: Comms,
     ctx_stack: [dynamic]Local_Ctx,
 }
 
 thread_ctx_init :: proc(ctx: ^Thread_Ctx, index, ctx_stack_capacity: int, shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
     ctx.id = index
+    comms_init(&ctx.comms)
     ctx.ctx_stack = make([dynamic]Local_Ctx, 1, ctx_stack_capacity + 1, allocator)
     ctx.ctx_stack[0] = Local_Ctx{ shared_ctx = shared_ctx, thread_index = index }
 }
 
 thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
-    message_boxes_destroy(&ctx.message_boxes)
+    comms_destroy(&ctx.comms)
     delete(ctx.ctx_stack)
 }
 
@@ -115,7 +116,7 @@ Shared_Ctx :: struct {
     mutex: sync.Mutex,
     thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
     barrier: Barrier,
-    message_boxes: MessageBoxes,
+    comms: Comms,
     branch: struct {
         init_counter: int,    // Slot claiming
         fini_counter: int,    // Exit reference count
@@ -131,11 +132,11 @@ Shared_Ctx :: struct {
 shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count: int) {
     ctx.thread_count = thread_count
     barrier_init(&ctx.barrier, thread_count)
-    message_boxes_init(&ctx.message_boxes)
+    comms_init(&ctx.comms)
 }
 
 shared_ctx_destroy :: proc(ctx: ^Shared_Ctx) {
-    message_boxes_destroy(&ctx.message_boxes)
+    comms_destroy(&ctx.comms)
     delete(ctx.thread_index_map)
 }
 

@@ -60,20 +60,20 @@ Job :: struct {
     mutex: sync.Mutex,
     cond: sync.Cond,
     steps: int,
-    message_box: MessageBox(Data),
+    comm: Comm(Data),
     allocator: mem.Allocator
 }
 
 job_create :: proc(step_count := 1, allocator := context.allocator) -> ^Job {
     job := new(Job, allocator)
-    message_box_init(&job.message_box)
+    comm_init(&job.comm)
     job.steps = step_count
     job.allocator = allocator
     return job
 }
 
 job_destroy :: proc(job: ^Job) {
-    message_box_destroy(&job.message_box)
+    comm_destroy(&job.comm)
     free(job, job.allocator)
 }
 
@@ -92,15 +92,15 @@ job_complete_step :: proc(job: ^Job) -> (done: bool) {
 }
 
 job_add_data :: proc(job: ^Job, data: Data) {
-    message_box_send(&job.message_box, Message(Data){0, data})
+    comm_send(&job.comm, Message(Data){0, data})
 }
 
 job_get_data :: proc(job: ^Job) -> Data {
-    return message_box_recv(&job.message_box).content
+    return comm_recv(&job.comm).content
 }
 
 job_try_get_data :: proc(job: ^Job) -> (Data, bool) {
-    msg, ok := message_box_try_recv(&job.message_box)
+    msg, ok := comm_try_recv(&job.comm)
     if ok do return msg.content, true
     return Data{}, false
 }
