@@ -195,7 +195,7 @@ get_thread_count :: proc(ctx: Ctx) -> int {
 
 // barrier /////////////////////////////
 
-barrier :: proc(ctx: Ctx, kind := BarrierKind.Sleep) {
+barrier :: proc(ctx: Ctx, kind := BarrierKind.Spin) {
     barrier_wait(&get_local_ctx(ctx).shared_ctx.barrier, kind)
 }
 
@@ -242,6 +242,7 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
             node0.thread_count = right_thread_count
             clear(&node0.thread_index_map)
             resize(&node0.thread_index_map, node0.thread_count)
+            barrier_init(&node0.barrier, node0.thread_count)
             node0.branch.init_counter = 0
             node0.branch.fini_counter = node0.thread_count
             node0.parent = parent_ctx
@@ -249,6 +250,7 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
             node1.thread_count = parent_ctx.thread_count - right_thread_count
             clear(&node1.thread_index_map)
             resize(&node1.thread_index_map, node1.thread_count)
+            barrier_init(&node1.barrier, node1.thread_count)
             node1.branch.init_counter = 0
             node1.branch.fini_counter = node1.thread_count
             node1.parent = parent_ctx
