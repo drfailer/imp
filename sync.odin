@@ -62,6 +62,7 @@ Job :: struct {
     queue: LockQueue(Data),
 }
 
+// TODO: allocator
 job_create :: proc(step_count := 1) -> ^Job {
     job := new(Job)
     queue_init(&job.queue)
@@ -78,7 +79,7 @@ job_reset :: proc(job: ^Job, step_count := 1) {
     sync.lock(&job.mutex)
     defer sync.unlock(&job.mutex)
     job.steps = step_count
-    // note: the queue is not cleared, may change later
+    queue_clear(&job.queue)
 }
 
 job_done :: proc(job: ^Job, mdata: Maybe(Data) = nil) {
