@@ -2,6 +2,7 @@ package imp
 
 import "core:sync"
 import "base:intrinsics"
+import "core:mem"
 import "core:fmt"
 
 // Barriers ////////////////////////////////////////////////////////////////////
@@ -59,78 +60,59 @@ Job :: struct {
     mutex: sync.Mutex,
     cond: sync.Cond,
     steps: int,
-    queue: LockQueue(Data),
+    message_box: MessageBox(Data),
+    allocator: mem.Allocator
 }
 
-// TODO: allocator
-job_create :: proc(step_count := 1) -> ^Job {
-    job := new(Job)
-    queue_init(&job.queue)
+job_create :: proc(step_count := 1, allocator := context.allocator) -> ^Job {
+    job := new(Job, allocator)
+    message_box_init(&job.message_box)
     job.steps = step_count
+    job.allocator = allocator
     return job
 }
 
 job_destroy :: proc(job: ^Job) {
-    queue_destroy(&job.queue)
-    free(job)
+    message_box_destroy(&job.message_box)
+    free(job, job.allocator)
 }
 
 job_reset :: proc(job: ^Job, step_count := 1) {
-    sync.lock(&job.mutex)
-    defer sync.unlock(&job.mutex)
+    sync.guard(&job.mutex)
     job.steps = step_count
-    queue_clear(&job.queue)
 }
 
-job_done :: proc(job: ^Job, mdata: Maybe(Data) = nil) {
+job_complete_step :: proc(job: ^Job) -> (done: bool) {
     sync.lock(&job.mutex)
     job.steps -= 1
+    done = (job.steps == 0)
     sync.unlock(&job.mutex)
-
-    should_signal := job.steps <= 1
-    if data, ok := mdata.?; ok {
-        queue_push(&job.queue, data)
-        should_signal = true
-    }
-    if should_signal {
-        sync.cond_broadcast(&job.cond)
-    }
+    if done do sync.broadcast(&job.cond)
+    return done
 }
 
-job_result :: proc(job: ^Job, data: Data) {
-    queue_push(&job.queue, data)
-    sync.cond_broadcast(&job.cond)
+job_add_data :: proc(job: ^Job, data: Data) {
+    message_box_send(&job.message_box, Message(Data){0, data})
+}
+
+job_get_data :: proc(job: ^Job) -> Data {
+    return message_box_recv(&job.message_box).content
+}
+
+job_try_get_data :: proc(job: ^Job) -> (Data, bool) {
+    msg, ok := message_box_try_recv(&job.message_box)
+    if ok do return msg.content, true
+    return Data{}, false
 }
 
 job_is_done :: proc(job: ^Job) -> bool {
-    sync.lock(&job.mutex)
-    defer sync.unlock(&job.mutex)
+    sync.guard(&job.mutex)
     return job.steps == 0
 }
 
-job_has_data :: proc(job: ^Job) -> bool {
-    return queue_size(&job.queue) > 0
-}
-
-job_pop_data :: proc(job: ^Job) -> (Data, bool) {
-    return queue_pop(&job.queue)
-}
-
-job_wait :: proc(job: ^Job) {
-    sync.lock(&job.mutex)
-    defer sync.unlock(&job.mutex)
+job_wait_completion :: proc(job: ^Job) {
+    sync.guard(&job.mutex)
     for job.steps > 0 {
         sync.cond_wait(&job.cond, &job.mutex)
     }
-}
-
-job_wait_data :: proc(job: ^Job) -> (data: Data, has_data: bool) {
-    sync.lock(&job.mutex)
-    defer sync.unlock(&job.mutex)
-    for {
-        if queue_size(&job.queue) > 0 do return queue_pop(&job.queue)
-        if job.steps <= 0 do break
-        sync.cond_wait(&job.cond, &job.mutex)
-    }
-    return data, false
 }
