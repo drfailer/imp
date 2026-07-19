@@ -4,6 +4,7 @@ import "core:sync"
 import "core:mem"
 import "base:intrinsics"
 import q "core:container/queue"
+import "base:runtime"
 import "core:fmt"
 
 SENTINEL_CTX :: cast(^Shared_Ctx)uintptr(0xDEADBEEF)
@@ -125,7 +126,8 @@ Shared_Ctx :: struct {
         ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
     },
     sync: union { // use for synchronizing values
-        u64,
+        rawptr,
+        runtime.Raw_Slice,
     },
 }
 
@@ -214,19 +216,58 @@ barrier :: proc(ctx: Ctx, kind := BarrierKind.Spin) {
 
 // sync values /////////////////////////
 
-sync_val64 :: proc(ctx: Ctx, val: ^$T, master_index: int) where size_of(T) == 8 {
+sync_vals_slice :: proc(ctx: Ctx, master_index: int, vals: []$T) {
+    if vals == nil do return
+
     shared_ctx := get_shared_ctx(ctx)
 
     if get_thread_index(ctx) == master_index {
-        shared_ctx.sync.(u64) = val^
+        shared_ctx.sync = runtime.Raw_Slice{raw_data(vals), len(vals)}
     }
     barrier(ctx, .Spin)
-    val^ = shared_ctx.sync.(u64)
+    if get_thread_index(ctx) != master_index {
+        master_vals := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
+        assert(len(vals) == len(master_vals))
+        for i in 0..<len(vals) {
+            vals[i] = master_vals[i]
+        }
+    }
     barrier(ctx, .Spin)
 }
 
-sync_val :: proc{
-    sync_val64,
+sync_vals_variadic :: proc(ctx: Ctx, master_index: int, $T: typeid, vals: ..^T) {
+    vals_array := make([dynamic]T, len(vals), context.temp_allocator)
+    defer delete(vals_array)
+
+    if get_thread_index(ctx) == master_index {
+        for val, idx in vals {
+            vals_array[idx] = val^
+        }
+    }
+    sync_vals_slice(ctx, master_index, vals_array[:])
+    if get_thread_index(ctx) != master_index {
+        for val, idx in vals {
+            val^ = vals_array[idx]
+        }
+    }
+}
+
+sync_vals :: proc{
+    sync_vals_slice,
+    sync_vals_variadic,
+}
+
+sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) where size_of(T) == 8 {
+    shared_ctx := get_shared_ctx(ctx)
+
+    if get_thread_index(ctx) == master_index {
+        shared_ctx.sync = cast(rawptr)val
+    }
+    barrier(ctx, .Spin)
+    if get_thread_index(ctx) != master_index {
+        val^ = (cast(^T)shared_ctx.sync.(rawptr))^
+    }
+    barrier(ctx, .Spin)
 }
 
 // reduce //////////////////////////////

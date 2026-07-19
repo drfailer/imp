@@ -98,6 +98,29 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
     imp.barrier(ctx)
 }
 
+exec_sync :: proc(ctx: imp.Ctx, i: int) {
+    val := imp.get_thread_index(ctx)
+    val1, val2, val3 := val, val * 2, val * 3
+    vals := []int{val1, val2, val3}
+    fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), i)
+
+    imp.barrier(ctx)
+    fmt.printfln("[{}/{}]: val before sync = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), val)
+    imp.sync_val(ctx, 1, &val)
+    fmt.printfln("[{}/{}]: val after sync = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), val)
+    imp.barrier(ctx)
+    fmt.printfln("[{}/{}]: before sync = val1 = {}, val2 = {}, val3 = {}",
+        imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), val1, val2, val3)
+    imp.sync_vals_variadic(ctx, 2, int, &val1, &val2, &val3)
+    fmt.printfln("[{}/{}]: after sync = val1 = {}, val2 = {}, val3 = {}",
+        imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), val1, val2, val3)
+    imp.barrier(ctx)
+    fmt.printfln("[{}/{}]: before sync = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), vals)
+    imp.sync_vals_slice(ctx, 3, vals)
+    fmt.printfln("[{}/{}]: after sync = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), vals)
+    imp.barrier(ctx)
+}
+
 run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I) {
     fmt.println("--------------")
     ctx: imp.Global_Ctx
@@ -110,4 +133,5 @@ main :: proc() {
     run_test(40, exec_branch, 1)
     run_test(40, exec_nested_branches, 2)
     run_test(4, exec_messages, 3)
+    run_test(4, exec_sync, 4)
 }
