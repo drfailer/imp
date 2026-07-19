@@ -22,32 +22,36 @@ Global_Ctx :: struct {
     shared: struct {
         root: ^Shared_Ctx,
         free_list: ^Shared_Ctx,
-    }
+    },
+    comm_channel_count: int,
 }
 
 DEFAULT_CONTEXT_CAPACITY :: #config(IMP_DEFAULT_CONTEXT_CAPACITY, 64)
 DEFAULT_SHARED_CTX_POOL_SIZE :: #config(IMP_DEFAULT_SHARED_CTX_POOL_SIZE, 16)
 
 global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int,
+                        comm_channel_count := 1,
                         shared_ctx_pool_capacity := DEFAULT_SHARED_CTX_POOL_SIZE,
                         thread_ctx_stack_capacity := DEFAULT_CONTEXT_CAPACITY) {
     mem.dynamic_arena_init(&ctx.arena)
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
 
+    ctx.comm_channel_count = comm_channel_count
+
     // Setup Root Context
     ctx.shared.root = new(Shared_Ctx, allocator)
-    shared_ctx_init(ctx.shared.root, thread_count)
+    shared_ctx_init(ctx.shared.root, thread_count, comm_channel_count)
     ctx.shared.free_list = nil
     for _ in 0..<DEFAULT_SHARED_CTX_POOL_SIZE {
         shared_ctx := new(Shared_Ctx, allocator)
-        shared_ctx_init(shared_ctx, thread_count - 1)
+        shared_ctx_init(shared_ctx, thread_count - 1, comm_channel_count)
         release_shared_ctx(ctx, shared_ctx) // release add to the pool
     }
 
     // Create Threads
     ctx.thread_ctxs = make([dynamic]Thread_Ctx, thread_count, allocator)
     for &tctx, idx in ctx.thread_ctxs {
-        thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, ctx.shared.root, allocator)
+        thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, comm_channel_count, ctx.shared.root, allocator)
     }
 }
 
@@ -78,7 +82,7 @@ alloc_shared_ctx :: proc(ctx: ^Global_Ctx) -> ^Shared_Ctx {
     }
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
     shared_ctx := new(Shared_Ctx, allocator)
-    comms_init(&shared_ctx.comms)
+    comms_init(&shared_ctx.comms, ctx.comm_channel_count)
     return shared_ctx
 }
 
@@ -103,9 +107,11 @@ Thread_Ctx :: struct {
     ctx_stack: [dynamic]Local_Ctx,
 }
 
-thread_ctx_init :: proc(ctx: ^Thread_Ctx, index, ctx_stack_capacity: int, shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
+thread_ctx_init :: proc(ctx: ^Thread_Ctx, index,
+                        ctx_stack_capacity, comm_channel_count: int,
+                        shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
     ctx.id = index
-    comms_init(&ctx.comms)
+    comms_init(&ctx.comms, comm_channel_count, allocator)
     ctx.ctx_stack = make([dynamic]Local_Ctx, 1, ctx_stack_capacity + 1, allocator)
     ctx.ctx_stack[0] = Local_Ctx{ shared_ctx = shared_ctx, thread_index = index }
 }
@@ -141,10 +147,10 @@ Shared_Ctx :: struct {
     },
 }
 
-shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count: int) {
+shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count, comm_channel_count: int) {
     ctx.thread_count = thread_count
     barrier_init(&ctx.barrier, thread_count)
-    comms_init(&ctx.comms)
+    comms_init(&ctx.comms, comm_channel_count)
 }
 
 shared_ctx_destroy :: proc(ctx: ^Shared_Ctx) {
@@ -485,76 +491,38 @@ join :: proc(ctx: Ctx) {
 
 // data ///////////
 
-send_data_parallel_ctx :: proc(ctx: Ctx, thread_index: int, data: Data) {
-    send_message_parallel_ctx(ctx, thread_index, data)
+send_data_parallel_ctx :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
+    send_message_parallel_ctx(ctx, thread_index, channel, data)
 }
 
-send_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data) {
-    send_message_shared_ctx(ctx, shared_ctx, thread_index, data)
+send_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
+    send_message_shared_ctx(ctx, shared_ctx, thread_index, channel, data)
 }
 
 send_data :: proc{ send_data_parallel_ctx, send_data_shared_ctx }
 
-recv_data :: proc(ctx: Ctx) -> (Data, int) {
-    return recv_message(ctx, Data)
+recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int) {
+    return recv_message(ctx, channel, Data)
 }
 
-try_recv_data :: proc(ctx: Ctx) -> (Data, int, bool) {
-    return try_get_message(ctx, Data)
+try_recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
+    return try_get_message(ctx, channel, Data)
 }
 
-put_data_parallel_ctx :: proc(ctx: Ctx, data: Data) {
-    put_message_parallel_ctx(ctx, data)
+put_data_parallel_ctx :: proc(ctx: Ctx, data: Data, channel := 0) {
+    put_message_parallel_ctx(ctx, channel, data)
 }
 
-put_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, data: Data) {
-    put_message_shared_ctx(ctx, shared_ctx, data)
+put_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, data: Data, channel := 0) {
+    put_message_shared_ctx(ctx, shared_ctx, channel, data)
 }
 
 put_data :: proc{ put_data_parallel_ctx, put_data_shared_ctx }
 
-get_data :: proc(ctx: Ctx) -> (Data, int) {
-    return get_message(ctx, Data)
+get_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int) {
+    return get_message(ctx, channel, Data)
 }
 
-try_get_data :: proc(ctx: Ctx) -> (Data, int, bool) {
-    return try_get_message(ctx, Data)
-}
-
-// job ////////////
-
-send_job_parallel_ctx :: proc(ctx: Ctx, thread_index: int, job: ^Job) {
-    send_message_parallel_ctx(ctx, thread_index, job)
-}
-
-send_job_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, job: ^Job) {
-    send_message_shared_ctx(ctx, shared_ctx, thread_index, job)
-}
-
-send_job :: proc{ send_job_parallel_ctx, send_job_shared_ctx }
-
-recv_job :: proc(ctx: Ctx) -> (^Job, int) {
-    return recv_message(ctx, ^Job)
-}
-
-try_recv_job :: proc(ctx: Ctx) -> (^Job, int, bool) {
-    return try_get_message(ctx, ^Job)
-}
-
-put_job_parallel_ctx :: proc(ctx: Ctx, job: ^Job) {
-    put_message_parallel_ctx(ctx, job)
-}
-
-put_job_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, job: ^Job) {
-    put_message_shared_ctx(ctx, shared_ctx, job)
-}
-
-put_job :: proc{ put_job_parallel_ctx, put_job_shared_ctx }
-
-get_job :: proc(ctx: Ctx) -> (^Job, int) {
-    return get_message(ctx, ^Job)
-}
-
-try_get_job :: proc(ctx: Ctx) -> (^Job, int, bool) {
-    return try_get_message(ctx, ^Job)
+try_get_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
+    return try_get_message(ctx, channel, Data)
 }

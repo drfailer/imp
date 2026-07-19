@@ -91,3 +91,5 @@ job_wait_completion :: proc(job: ^Job) {
         sync.wait(&job.cond, &job.mutex)
     }
 }
+
+// TODO: CommunicatingJob

@@ -17,8 +17,8 @@ Comm :: struct($T: typeid) {
     mutex: sync.Atomic_Mutex,
 }
 
-comm_init :: proc(comm: ^Comm($T)) {
-    queue_init(&comm.queue)
+comm_init :: proc(comm: ^Comm($T), allocator := context.allocator) {
+    queue_init(&comm.queue, allocator)
 }
 
 comm_destroy :: proc(comm: ^Comm($T)) {
@@ -51,51 +51,56 @@ comm_get_size :: proc(comm: ^Comm($T)) -> int {
 
 // Core utilities //////////////////////////////////////////////////////////////
 
-// utility types for supported messages types within the library
+ANY_CHANNEL :: -1
 
 @(private)
 Comms :: struct {
-    datas: Comm(Data),
-    jobs: Comm(^Job),
+    channels: [dynamic]Comm(Data),
 }
 
 @(private)
-comms_init :: proc(comms: ^Comms) {
-    comm_init(&comms.datas)
-    comm_init(&comms.jobs)
+comms_init :: proc(comms: ^Comms, channel_count: int, allocator := context.allocator) {
+    comms.channels = make([dynamic]Comm(Data), channel_count, allocator)
+    for &channel in comms.channels {
+        comm_init(&channel, allocator)
+    }
 }
 
 @(private)
 comms_destroy :: proc(comms: ^Comms) {
-    comm_destroy(&comms.datas)
-    comm_destroy(&comms.jobs)
+    for &channel in comms.channels {
+        comm_destroy(&channel)
+    }
+    delete(comms.channels)
 }
 
 @(private)
-comms_send :: proc(comms: ^Comms, m: Message($T)) {
-    when T == Data {
-        comm_send(&comms.datas, m)
-    } else {
-        comm_send(&comms.jobs, m)
-    }
+comms_send :: proc(comms: ^Comms, m: Message($T), channel := 0) {
+    comm_send(&comms.channels[channel], m)
 }
 
 @(private)
-comms_recv :: proc(comms: ^Comms, $T: typeid) -> Message(T) {
-    when T == Data {
-        return comm_recv(&comms.datas)
-    } else {
-        return comm_recv(&comms.jobs)
+comms_recv :: proc(comms: ^Comms, $T: typeid, channel := ANY_CHANNEL) -> Message(T) {
+    if channel == ANY_CHANNEL {
+        for {
+            for &channel in comms.channels {
+                if msg, ok := comm_try_recv(&channel); ok do return msg
+            }
+            intrinsics.cpu_relax()
+        }
     }
+    return comm_recv(&comms.channels[channel])
 }
 
 @(private)
-comms_try_recv :: proc(comms: ^Comms, $T: typeid) -> (m: Message(T), received: bool) {
-    when T == Data {
-        return comm_try_recv(&comms.datas)
-    } else {
-        return comm_try_recv(&comms.jobs)
+comms_try_recv :: proc(comms: ^Comms, $T: typeid, channel := ANY_CHANNEL) -> (m: Message(T), received: bool) {
+    if channel == ANY_CHANNEL {
+        for &channel in comms.channels {
+            if msg, ok := comm_try_recv(&channel); ok do return msg, true
+        }
+        return {}, false
     }
+    return comm_try_recv(&comms.channels[channel])
 }
 
 // API utilities ///////////////////////////////////////////////////////////////
@@ -122,16 +127,16 @@ get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, i
 // globally if the given thread index is negative.
 //
 @(private)
-send_message_parallel_ctx :: proc(ctx: Ctx, thread_index: int, content: $T) {
+send_message_parallel_ctx :: proc(ctx: Ctx, thread_index, channel: int, content: $T) {
     shared_ctx := get_local_ctx(ctx).shared_ctx
     if thread_index >= 0 {
         // local send
         receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
-        comms_send(&receiver_data.comms, Message(T){get_thread_index(ctx), content})
+        comms_send(&receiver_data.comms, Message(T){get_thread_index(ctx), content}, channel)
     } else {
         // global send
         receiver_data := &ctx.global_ctx.thread_ctxs[~thread_index]
-        comms_send(&receiver_data.comms, Message(T){~get_thread_id(ctx), content})
+        comms_send(&receiver_data.comms, Message(T){~get_thread_id(ctx), content}, channel)
     }
 }
 
@@ -141,22 +146,22 @@ send_message_parallel_ctx :: proc(ctx: Ctx, thread_index: int, content: $T) {
 // thread id allowing for a global response.
 //
 @(private)
-send_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, content: $T) {
+send_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index, channel: int, content: $T) {
     assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
     assert(thread_index >= 0)
     receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
-    comms_send(&receiver_data.comms, Message(T){~get_thread_id(ctx), content})
+    comms_send(&receiver_data.comms, Message(T){~get_thread_id(ctx), content}, channel)
 }
 
 @(private)
-recv_message :: proc(ctx: Ctx, $T: typeid) -> (T, int) {
-    msg := comms_recv(&ctx.thread_ctx.comms, T)
+recv_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int) {
+    msg := comms_recv(&ctx.thread_ctx.comms, T, channel)
     return msg.content, msg.sender_index
 }
 
 @(private)
-try_recv_message :: proc(ctx: Ctx, $T: typeid) -> (T, int, bool) {
-    msg, ok := comms_try_recv(&ctx.thread_data.comms, T)
+try_recv_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int, bool) {
+    msg, ok := comms_try_recv(&ctx.thread_data.comms, T, channel)
     if !ok do return {}, 0, false
     return msg.content, msg.sender_index, true
 }
@@ -165,28 +170,28 @@ try_recv_message :: proc(ctx: Ctx, $T: typeid) -> (T, int, bool) {
 // Put a message in the message box of the current branch context.
 //
 @(private)
-put_message_parallel_ctx :: proc(ctx: Ctx, content: $T) {
-    comms_send(&get_local_ctx(ctx).shared_ctx.comms, Message(T){get_thread_index(ctx), content})
+put_message_parallel_ctx :: proc(ctx: Ctx, channel: int, content: $T) {
+    comms_send(&get_local_ctx(ctx).shared_ctx.comms, Message(T){get_thread_index(ctx), content}, channel)
 }
 
 //
 // Put a message in the message box of another branch context.
 //
 @(private)
-put_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, content: $T) {
+put_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, channel: int, content: $T) {
     assert(get_local_ctx(ctx).shared_ctx != shared_ctx)
-    comms_send(&shared_ctx.comms, Message(T){~get_thread_id(ctx), content})
+    comms_send(&shared_ctx.comms, Message(T){~get_thread_id(ctx), content}, channel)
 }
 
 @(private)
-get_message :: proc(ctx: Ctx, $T: typeid) -> (T, int) {
-    msg := comms_recv(&get_local_ctx(ctx).shared_ctx.comms, T)
+get_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int) {
+    msg := comms_recv(&get_local_ctx(ctx).shared_ctx.comms, T, channel)
     return msg.content, msg.sender_index
 }
 
 @(private)
-try_get_message :: proc(ctx: Ctx, $T: typeid) -> (T, int, bool) {
-    msg, ok := comms_try_recv(&get_local_ctx(ctx).shared_ctx.comms, T)
+try_get_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int, bool) {
+    msg, ok := comms_try_recv(&get_local_ctx(ctx).shared_ctx.comms, T, channel)
     if !ok do return {}, 0, false
     return msg.content, msg.sender_index, true
 }
