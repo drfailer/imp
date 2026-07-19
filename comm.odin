@@ -26,7 +26,9 @@ comm_destroy :: proc(comm: ^Comm($T)) {
 }
 
 comm_send :: proc(comm: ^Comm($T), m: Message(T)) {
+    sync.lock(&comm.mutex)
     queue_push(&comm.queue, m)
+    sync.unlock(&comm.mutex)
     sync.signal(&comm.cond)
 }
 
