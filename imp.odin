@@ -267,7 +267,7 @@ sync_vals :: proc{
     sync_vals_variadic,
 }
 
-sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) where size_of(T) == 8 {
+sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) {
     shared_ctx := get_shared_ctx(ctx)
 
     if get_thread_index(ctx) == master_index {
