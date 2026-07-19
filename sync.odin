@@ -92,4 +92,28 @@ job_wait_completion :: proc(job: ^Job) {
     }
 }
 
-// TODO: CommunicatingJob
+CommJob :: struct($T: typeid) {
+    using job: Job,
+    comm: Comm(T),
+}
+
+comm_job_init :: proc(job: ^CommJob($T), steps := 1, allocator := context.allocator) {
+    job_init(job, steps)
+    comm_init(&job.comm)
+}
+
+comm_job_destroy :: proc(job: ^CommJob($T)) {
+    comm_destroy(&job.comm)
+}
+
+comm_job_send :: proc(job: ^CommJob($T), data: T) {
+    comm_send(&job.comm, Message(int){0, data})
+}
+
+comm_job_recv :: proc(job: ^CommJob($T)) -> T {
+    return comm_recv(&job.comm).content
+}
+
+comm_job_try_recv :: proc(job: ^CommJob($T)) -> (T, bool) {
+    return comm_try_recv(&job.comm)
+}

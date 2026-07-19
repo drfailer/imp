@@ -144,6 +144,36 @@ exec_range :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}]: after = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), vals)
 }
 
+exec_job :: proc(ctx: imp.Ctx, i: int) {
+    ensure(imp.get_thread_count(ctx) == 4)
+    job: ^imp.CommJob(int)
+
+    if imp.get_thread_index(ctx) == 0 {
+        job = new(imp.CommJob(int))
+        imp.comm_job_init(job, 2)
+    }
+    imp.sync_val(ctx, 0, &job)
+
+    if imp.branch(ctx, 2) {
+        // producer
+        imp.comm_job_send(job, imp.get_thread_index(ctx))
+        imp.job_wait_completion(job)
+    } else {
+        // consumer
+        data := imp.comm_job_recv(job)
+        fmt.println("received data through comm job:", data)
+        imp.job_complete_step(job)
+    }
+    imp.join(ctx)
+    imp.barrier(ctx)
+
+    if imp.get_thread_index(ctx) == 0 {
+        imp.comm_job_destroy(job)
+        free(job)
+    }
+    fmt.printfln("[{}/{}] done", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
+}
+
 run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I) {
     fmt.println("--------------")
     ctx: imp.Global_Ctx
@@ -158,4 +188,5 @@ main :: proc() {
     run_test(4, exec_messages, 3)
     run_test(4, exec_sync, 4)
     run_test(4, exec_range, 5)
+    run_test(4, exec_job, 6)
 }
