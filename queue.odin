@@ -36,8 +36,8 @@ LockQueue :: struct($T: typeid) {
     mutex: sync.Mutex,
 }
 
-lock_queue_init :: proc(queue: ^LockQueue($T)) {
-    q.init(&queue.datas)
+lock_queue_init :: proc(queue: ^LockQueue($T), allocator := context.allocator) {
+    q.init(&queue.datas, allocator = allocator)
 }
 
 lock_queue_destroy :: proc(queue: ^LockQueue($T)) {
