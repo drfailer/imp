@@ -280,6 +280,53 @@ sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) {
     barrier(ctx, .Spin)
 }
 
+// range ///////////////////////////////
+
+Range :: struct {
+    thread_count: int,
+    init, step, max: int,
+    it_out, it_in, it: int,
+}
+
+range_init :: proc(ctx: Ctx, count: int) -> Range {
+    thread_count := get_thread_count(ctx)
+    thread_index := get_thread_index(ctx)
+
+    if thread_count >= count {
+        return Range{thread_count, thread_index, 1, count, thread_index, 0, thread_index}
+    }
+
+    step := count / thread_count
+    start_idx := thread_index * step
+    return Range{thread_count, start_idx, step, count, thread_index, 0, thread_index}
+}
+
+range_continue :: proc(range: Range) -> bool {
+    return range.it < range.max
+}
+
+range_next_mut :: proc(range: ^Range) {
+    range.it_in += 1
+    if range.it_in == range.step {
+        range.it_in = 0
+        range.it_out += range.thread_count
+        range.it = range.it_out * range.step
+    } else {
+        range.it += 1
+    }
+}
+
+range_next_imut :: proc(range: Range) -> Range {
+    range := range
+    range_next_mut(&range)
+    return range
+}
+
+range_next :: proc{
+    range_next_mut,
+    range_next_imut,
+}
+
 // reduce //////////////////////////////
 
 // TODO: we will need more reduction functions depending on the situation

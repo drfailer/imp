@@ -121,6 +121,29 @@ exec_sync :: proc(ctx: imp.Ctx, i: int) {
     imp.barrier(ctx)
 }
 
+exec_range :: proc(ctx: imp.Ctx, i: int) {
+    vals: [dynamic]int
+    if imp.get_thread_index(ctx) == 0 {
+        vals = make([dynamic]int, 22)
+        for &val, idx in vals {
+            val = idx
+        }
+    }
+    imp.sync_val(ctx, 0, &vals)
+    fmt.printfln("[{}/{}]: before = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), vals)
+    imp.barrier(ctx)
+
+
+    for r := imp.range_init(ctx, len(vals)); imp.range_continue(r); r = imp.range_next(r) {
+        if imp.get_thread_index(ctx) == 0 {
+            fmt.println(r)
+        }
+        vals[r.it] *= 2
+    }
+    imp.barrier(ctx)
+    fmt.printfln("[{}/{}]: after = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), vals)
+}
+
 run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I) {
     fmt.println("--------------")
     ctx: imp.Global_Ctx
@@ -134,4 +157,5 @@ main :: proc() {
     run_test(40, exec_nested_branches, 2)
     run_test(4, exec_messages, 3)
     run_test(4, exec_sync, 4)
+    run_test(4, exec_range, 5)
 }
