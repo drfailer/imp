@@ -191,12 +191,10 @@ Ctx :: struct {
     thread_ctx: ^Thread_Ctx,
 }
 
-@(private)
 get_local_ctx :: proc(ctx: Ctx) -> ^Local_Ctx {
     return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
 }
 
-@(private)
 get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
     return get_local_ctx(ctx).shared_ctx
 }
@@ -483,6 +481,12 @@ join :: proc(ctx: Ctx) {
         release_shared_ctx(ctx.global_ctx, cur_ctx)
     }
     pop(&ctx.thread_ctx.ctx_stack)
+}
+
+join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
+    for get_local_ctx(ctx) != local_ctx {
+        join(ctx)
+    }
 }
 
 // messages ////////////////////////////
