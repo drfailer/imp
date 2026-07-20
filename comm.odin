@@ -58,6 +58,8 @@ ANY_CHANNEL :: -1
 @(private)
 Comms :: struct {
     channels: [dynamic]Comm(Data),
+    mutex: sync.Atomic_Mutex,
+    cond: sync.Atomic_Cond,
 }
 
 @(private)
@@ -79,6 +81,7 @@ comms_destroy :: proc(comms: ^Comms) {
 @(private)
 comms_send :: proc(comms: ^Comms, m: Message($T), channel := 0) {
     comm_send(&comms.channels[channel], m)
+    sync.signal(&comms.cond)
 }
 
 @(private)
@@ -88,7 +91,9 @@ comms_recv :: proc(comms: ^Comms, $T: typeid, channel := ANY_CHANNEL) -> Message
             for &channel in comms.channels {
                 if msg, ok := comm_try_recv(&channel); ok do return msg
             }
-            intrinsics.cpu_relax()
+            if sync.guard(&comms.mutex) {
+                sync.wait(&comms.cond, &comms.mutex)
+            }
         }
     }
     return comm_recv(&comms.channels[channel])
