@@ -135,5 +135,6 @@ comm_job_recv :: proc(job: ^CommJob($T)) -> T {
 }
 
 comm_job_try_recv :: proc(job: ^CommJob($T)) -> (T, bool) {
-    return comm_try_recv(&job.comm)
+    msg, ok := comm_try_recv(&job.comm)
+    return msg.content, ok
 }
