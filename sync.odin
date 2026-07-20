@@ -59,22 +59,22 @@ barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Sleep) {
 Job :: struct {
     mutex: sync.Atomic_Mutex,
     cond: sync.Atomic_Cond,
-    steps: int,
+    work_count: int,
 }
 
-job_init :: proc(job: ^Job, step_count := 1) {
-    job.steps = step_count
+job_init :: proc(job: ^Job, work_count := 1) {
+    job.work_count = work_count
 }
 
-job_reset :: proc(job: ^Job, step_count := 1) {
+job_reset :: proc(job: ^Job, work_count := 1) {
     sync.guard(&job.mutex)
-    job.steps = step_count
+    job.work_count = work_count
 }
 
 job_complete_step :: proc(job: ^Job) -> (done: bool) {
     sync.lock(&job.mutex)
-    job.steps -= 1
-    done = (job.steps == 0)
+    job.work_count -= 1
+    done = (job.work_count == 0)
     sync.unlock(&job.mutex)
     if done do sync.broadcast(&job.cond)
     return done
@@ -82,12 +82,20 @@ job_complete_step :: proc(job: ^Job) -> (done: bool) {
 
 job_is_done :: proc(job: ^Job) -> bool {
     sync.guard(&job.mutex)
-    return job.steps == 0
+    return job.work_count == 0
 }
 
 job_wait_completion :: proc(job: ^Job) {
     sync.guard(&job.mutex)
-    for job.steps > 0 {
+    for job.work_count > 0 {
+        sync.wait(&job.cond, &job.mutex)
+    }
+}
+
+job_wait_update :: proc(job: ^Job) {
+    sync.guard(&job.mutex)
+    work_count := job.work_count
+    for job.work_count == work_count && job.work_count > 0 {
         sync.wait(&job.cond, &job.mutex)
     }
 }
@@ -97,8 +105,8 @@ CommJob :: struct($T: typeid) {
     comm: Comm(T),
 }
 
-comm_job_init :: proc(job: ^CommJob($T), steps := 1, allocator := context.allocator) {
-    job_init(job, steps)
+comm_job_init :: proc(job: ^CommJob($T), work_count := 1, allocator := context.allocator) {
+    job_init(job, work_count)
     comm_init(&job.comm)
 }
 
