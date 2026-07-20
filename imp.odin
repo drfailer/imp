@@ -5,6 +5,7 @@ import "core:mem"
 import "base:intrinsics"
 import q "core:container/queue"
 import "base:runtime"
+import "core:time"
 import "core:fmt"
 
 SENTINEL_CTX :: cast(^Shared_Ctx)uintptr(0xDEADBEEF)
@@ -24,6 +25,7 @@ Global_Ctx :: struct {
         free_list: ^Shared_Ctx,
     },
     comm_channel_count: int,
+    profilers: Profilers,
 }
 
 DEFAULT_CONTEXT_CAPACITY :: #config(IMP_DEFAULT_CONTEXT_CAPACITY, 64)
@@ -52,6 +54,16 @@ global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int,
     ctx.thread_ctxs = make([dynamic]Thread_Ctx, thread_count, allocator)
     for &tctx, idx in ctx.thread_ctxs {
         thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, comm_channel_count, ctx.shared.root, allocator)
+    }
+
+    when PROFILER_ENABLED {
+        // TODO: the profiler should use the thread allocator
+        ctx.profilers.profilers = make([]Profiler, thread_count, allocator)
+        time.stopwatch_start(&ctx.profilers.stopwatch)
+        for &tctx, idx in ctx.thread_ctxs {
+            profiler_init(&ctx.profilers.profilers[idx])
+            tctx.profiler = &ctx.profilers.profilers[idx]
+        }
     }
 }
 
@@ -105,6 +117,7 @@ Thread_Ctx :: struct {
     id: int,
     comms: Comms,
     ctx_stack: [dynamic]Local_Ctx,
+    profiler: ^Profiler,
 }
 
 thread_ctx_init :: proc(ctx: ^Thread_Ctx, index,

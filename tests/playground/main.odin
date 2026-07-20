@@ -17,15 +17,20 @@ exec_branch :: proc(ctx: imp.Ctx, i: int) {
 }
 
 exec_nested_branches :: proc(ctx: imp.Ctx, i: int) {
+    imp.prof_procedure(ctx)
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), i)
 
     if imp.branch(ctx, imp.get_thread_count(ctx) / 2) {
+        imp.prof_region(ctx, "branch0")
         fmt.printfln("branch0(1, 2)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
     } else {
+        imp.prof_region(ctx, "branch1")
         fmt.printfln("branch1(1, 2)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
         if imp.branch(ctx, imp.get_thread_count(ctx) / 2) {
+            imp.prof_region(ctx, "branch10")
             fmt.printfln("branch0(3, 4)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
         } else {
+            imp.prof_region(ctx, "branch11")
             fmt.printfln("branch1(3, 4)[{}/{}]", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
         }
         imp.join(ctx)
@@ -180,6 +185,9 @@ run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I)
     imp.global_ctx_init(&ctx, thread_count)
     defer imp.global_ctx_destroy(&ctx)
     imp.lauch(&ctx, exec, data)
+    if data == 2 {
+        imp.prof_print_report_dot(ctx, "test.dot")
+    }
 }
 
 main :: proc() {
