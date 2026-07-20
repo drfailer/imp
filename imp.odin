@@ -499,15 +499,32 @@ send_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: in
     send_message_shared_ctx(ctx, shared_ctx, thread_index, channel, data)
 }
 
-send_data :: proc{ send_data_parallel_ctx, send_data_shared_ctx }
+send_data_comm :: proc(ctx: Ctx, comm: ^Comm($T), data: T) {
+    comm_send(comm. Message(T){get_thread_id(ctx), data})
+}
 
-recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int) {
+send_data :: proc{ send_data_parallel_ctx, send_data_shared_ctx, send_data_comm }
+
+recv_data_channel :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int) {
     return recv_message(ctx, channel, Data)
 }
 
-try_recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
+recv_data_comm :: proc(ctx: Ctx, comm: ^Comm($T)) -> T {
+    return comm_recv(comm).content
+}
+
+recv_data :: proc{ recv_data_channel, recv_data_comm }
+
+try_recv_data_channel :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
     return try_get_message(ctx, channel, Data)
 }
+
+try_recv_data_comm :: proc(ctx: Ctx, comm: ^Comm($T)) -> (data: T, ok: bool) {
+    if msg, ok := comm_try_recv(comm); ok do return msg.content, true
+    return
+}
+
+try_recv_data :: proc{ try_recv_data_channel, try_recv_data_comm }
 
 put_data_parallel_ctx :: proc(ctx: Ctx, data: Data, channel := 0) {
     put_message_parallel_ctx(ctx, channel, data)
