@@ -55,7 +55,8 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
         imp.send_data(ctx, branch_ctx[1], imp.get_thread_index(ctx), imp.make_data(&text))
 
         for i in 0..<2 {
-            data, sender := imp.recv_data(ctx)
+            data, sender, ok := imp.recv_data(ctx)
+            ensure(ok)
             if sender >= 0 {
                 fmt.printfln("branch0[{}/{}]: {} (local from {})",
                     imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx),
@@ -67,7 +68,8 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
                 imp.send_data(ctx, sender, imp.make_data(&text))
             }
         }
-        data, sender := imp.recv_data(ctx)
+        data, sender, ok := imp.recv_data(ctx)
+        ensure(ok)
         fmt.printfln("branch0[{}/{}]: {} (global from {})",
             imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx),
             imp.data_ptr(data, string)^, ~sender)
@@ -80,7 +82,8 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
         imp.send_data(ctx, branch_ctx[0], imp.get_thread_index(ctx), imp.make_data(&text))
 
         for _ in 0..<2 {
-            data, sender := imp.recv_data(ctx)
+            data, sender, ok := imp.recv_data(ctx)
+            ensure(ok)
             if sender >= 0 {
                 fmt.printfln("branch1[{}/{}]: {} (local from {})",
                     imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx),
@@ -92,7 +95,8 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
                 imp.send_data(ctx, sender, imp.make_data(&text))
             }
         }
-        data, sender := imp.recv_data(ctx)
+        data, sender, ok := imp.recv_data(ctx)
+        ensure(ok)
         fmt.printfln("branch1[{}/{}]: {} (global from {})",
             imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx),
             imp.data_ptr(data, string)^, ~sender)

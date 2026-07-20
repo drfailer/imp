@@ -12,6 +12,7 @@ Message :: struct($T: typeid) {
 }
 
 Comm :: struct($T: typeid) {
+    closed: bool,
     queue: LockQueue(Message(T)),
     cond: sync.Atomic_Cond,
     mutex: sync.Atomic_Mutex,
@@ -25,6 +26,32 @@ comm_destroy :: proc(comm: ^Comm($T)) {
     queue_destroy(&comm.queue)
 }
 
+comm_open :: proc(comm: ^Comm($T)) {
+    sync.lock(&comm.mutex)
+    comm.closed = false
+    sync.unlock(&comm.mutex)
+    sync.broadcast(&comm.cond)
+}
+
+comm_close :: proc(comm: ^Comm($T)) {
+    sync.lock(&comm.mutex)
+    comm.closed = true
+    sync.unlock(&comm.mutex)
+    sync.broadcast(&comm.cond)
+}
+
+comm_closed :: proc(comm: ^Comm($T)) -> bool {
+    sync.guard(&comm.mutex)
+    return comm.closed
+}
+
+comm_wait_openning :: proc(comm: ^Comm($T)) {
+    sync.guard(&comm.mutex)
+    for comm.closed {
+        sync.wait(&comm.cond, &comm.mutex)
+    }
+}
+
 comm_send :: proc(comm: ^Comm($T), m: Message(T)) {
     sync.lock(&comm.mutex)
     queue_push(&comm.queue, m)
@@ -32,23 +59,20 @@ comm_send :: proc(comm: ^Comm($T), m: Message(T)) {
     sync.signal(&comm.cond)
 }
 
-comm_recv :: proc(comm: ^Comm($T)) -> Message(T) {
+comm_recv :: proc(comm: ^Comm($T)) -> (m: Message(T), ok: bool) {
     sync.lock(&comm.mutex)
     defer sync.unlock(&comm.mutex)
     for {
-        if m, ok := queue_pop(&comm.queue); ok {
-            return m
+        if m, ok = queue_pop(&comm.queue); ok {
+            return m, true
         }
+        if comm.closed do return m, false
         sync.wait(&comm.cond, &comm.mutex)
     }
 }
 
 comm_try_recv :: proc(comm: ^Comm($T)) -> (m: Message(T), received: bool) {
     return queue_pop(&comm.queue)
-}
-
-comm_get_size :: proc(comm: ^Comm($T)) -> int {
-    return queue_size(&comm.queue)
 }
 
 // Core utilities //////////////////////////////////////////////////////////////
@@ -85,12 +109,15 @@ comms_send :: proc(comms: ^Comms, m: Message($T), channel := 0) {
 }
 
 @(private)
-comms_recv :: proc(comms: ^Comms, $T: typeid, channel := ANY_CHANNEL) -> Message(T) {
+comms_recv :: proc(comms: ^Comms, $T: typeid, channel := ANY_CHANNEL) -> (Message(T), bool) {
     if channel == ANY_CHANNEL {
         for {
+            opened := false
             for &channel in comms.channels {
-                if msg, ok := comm_try_recv(&channel); ok do return msg
+                if msg, ok := comm_try_recv(&channel); ok do return msg, true
+                opened |= !comm_closed(&channel)
             }
+            if !opened do return {}, false
             if sync.guard(&comms.mutex) {
                 sync.wait(&comms.cond, &comms.mutex)
             }
@@ -161,9 +188,9 @@ send_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index,
 }
 
 @(private)
-recv_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int) {
-    msg := comms_recv(&ctx.thread_ctx.comms, T, channel)
-    return msg.content, msg.sender_index
+recv_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int, bool) {
+    msg, ok := comms_recv(&ctx.thread_ctx.comms, T, channel)
+    return msg.content, msg.sender_index, ok
 }
 
 @(private)

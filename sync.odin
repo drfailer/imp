@@ -131,7 +131,9 @@ comm_job_send :: proc(job: ^CommJob($T), data: T) {
 }
 
 comm_job_recv :: proc(job: ^CommJob($T)) -> T {
-    return comm_recv(&job.comm).content
+    msg, ok := comm_recv(&job.comm)
+    ensure(ok, "communicator should not be closed for jobs")
+    return msg.content
 }
 
 comm_job_try_recv :: proc(job: ^CommJob($T)) -> (T, bool) {
