@@ -94,7 +94,6 @@ alloc_shared_ctx :: proc(ctx: ^Global_Ctx) -> ^Shared_Ctx {
     }
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
     shared_ctx := new(Shared_Ctx, allocator)
-    comms_init(&shared_ctx.comms, ctx.comm_channel_count)
     return shared_ctx
 }
 
@@ -146,7 +145,6 @@ Shared_Ctx :: struct {
     mutex: sync.Mutex,
     thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
     barrier: Barrier,
-    comms: Comms,
     branch: struct {
         init_counter: int,    // Slot claiming
         fini_counter: int,    // Exit reference count
@@ -163,11 +161,9 @@ Shared_Ctx :: struct {
 shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count, comm_channel_count: int) {
     ctx.thread_count = thread_count
     barrier_init(&ctx.barrier, thread_count)
-    comms_init(&ctx.comms, comm_channel_count)
 }
 
 shared_ctx_destroy :: proc(ctx: ^Shared_Ctx) {
-    comms_destroy(&ctx.comms)
     delete(ctx.thread_index_map)
 }
 
@@ -492,21 +488,10 @@ join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
 // messages ////////////////////////////
 
 //
-// send: send a message to another thread (use the message box from the target thread data)
-// recv: recv a message from this thread message box (we do not allow
-//       specifying the sender, the first message in the queue should be
-//       received and process in priority)
-// put: put a message in the current context message box.
-// get: get a message from the current context message box.
-//
-// try_recv & try_put are non blocking (return a bool).
-//
 // A negative thread index will be treated as a ~global thread id. When threads
 // communicate outside of the current current context, they use their thread id
 // as identifier and make it negative so that the receiver can know.
 //
-
-// data ///////////
 
 send_data_parallel_ctx :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
     send_message_parallel_ctx(ctx, thread_index, channel, data)
@@ -532,31 +517,7 @@ recv_data_comm :: proc(ctx: Ctx, comm: ^Comm($T)) -> T {
 
 recv_data :: proc{ recv_data_channel, recv_data_comm }
 
-try_recv_data_channel :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    return try_get_message(ctx, channel, Data)
-}
-
-try_recv_data_comm :: proc(ctx: Ctx, comm: ^Comm($T)) -> (data: T, ok: bool) {
+try_recv_data :: proc(ctx: Ctx, comm: ^Comm($T)) -> (data: T, ok: bool) {
     if msg, ok := comm_try_recv(comm); ok do return msg.content, true
     return
-}
-
-try_recv_data :: proc{ try_recv_data_channel, try_recv_data_comm }
-
-put_data_parallel_ctx :: proc(ctx: Ctx, data: Data, channel := 0) {
-    put_message_parallel_ctx(ctx, channel, data)
-}
-
-put_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, data: Data, channel := 0) {
-    put_message_shared_ctx(ctx, shared_ctx, channel, data)
-}
-
-put_data :: proc{ put_data_parallel_ctx, put_data_shared_ctx }
-
-get_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int) {
-    return get_message(ctx, channel, Data)
-}
-
-try_get_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    return try_get_message(ctx, channel, Data)
 }

@@ -172,33 +172,3 @@ try_recv_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int, bool) {
     if !ok do return {}, 0, false
     return msg.content, msg.sender_index, true
 }
-
-//
-// Put a message in the message box of the current branch context.
-//
-@(private)
-put_message_parallel_ctx :: proc(ctx: Ctx, channel: int, content: $T) {
-    comms_send(&get_local_ctx(ctx).shared_ctx.comms, Message(T){get_thread_index(ctx), content}, channel)
-}
-
-//
-// Put a message in the message box of another branch context.
-//
-@(private)
-put_message_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, channel: int, content: $T) {
-    assert(get_local_ctx(ctx).shared_ctx != shared_ctx)
-    comms_send(&shared_ctx.comms, Message(T){~get_thread_id(ctx), content}, channel)
-}
-
-@(private)
-get_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int) {
-    msg := comms_recv(&get_local_ctx(ctx).shared_ctx.comms, T, channel)
-    return msg.content, msg.sender_index
-}
-
-@(private)
-try_get_message :: proc(ctx: Ctx, channel: int, $T: typeid) -> (T, int, bool) {
-    msg, ok := comms_try_recv(&get_local_ctx(ctx).shared_ctx.comms, T, channel)
-    if !ok do return {}, 0, false
-    return msg.content, msg.sender_index, true
-}
