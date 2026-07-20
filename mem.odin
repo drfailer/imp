@@ -47,8 +47,20 @@ pool_init :: proc(pool: ^Pool($T), capacity: uint,
     return
 }
 
-pool_destroy :: proc(pool: ^Pool($T)) {
-    arena_destroy(&pool.arena)
+pool_destroy_simple :: proc(pool: ^Pool($T)) {
+    vmem.arena_destroy(&pool.arena)
+}
+
+pool_destroy_with_item_destroy :: proc(pool: ^Pool($T), item_destroy: proc(item: ^T, data: $D), data: D) {
+    for node := pool.free_list; node != nil; node = node.next {
+        item_destroy(node, data)
+    }
+    vmem.arena_destroy(&pool.arena)
+}
+
+pool_destroy :: proc{
+    pool_destroy_simple,
+    pool_destroy_with_item_destroy,
 }
 
 pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, ok: bool){
