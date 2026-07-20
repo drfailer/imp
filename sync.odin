@@ -71,13 +71,24 @@ job_reset :: proc(job: ^Job, work_count := 1) {
     job.work_count = work_count
 }
 
-job_complete_step :: proc(job: ^Job) -> (done: bool) {
+job_complete_work :: proc(job: ^Job, work_count := 1) -> (done: bool) {
     sync.lock(&job.mutex)
-    job.work_count -= 1
+    job.work_count = max(0, job.work_count - work_count)
     done = (job.work_count == 0)
     sync.unlock(&job.mutex)
     if done do sync.broadcast(&job.cond)
     return done
+}
+
+job_add_work :: proc(job: ^Job, work_count := 1) {
+    sync.lock(&job.mutex)
+    job.work_count += work_count
+    sync.unlock(&job.mutex)
+    if work_count == 1 {
+        sync.signal(&job.cond)
+    } else {
+        sync.broadcast(&job.cond)
+    }
 }
 
 job_is_done :: proc(job: ^Job) -> bool {
@@ -92,12 +103,13 @@ job_wait_completion :: proc(job: ^Job) {
     }
 }
 
-job_wait_update :: proc(job: ^Job) {
+job_wait_update :: proc(job: ^Job) -> bool {
     sync.guard(&job.mutex)
     work_count := job.work_count
     for job.work_count == work_count && job.work_count > 0 {
         sync.wait(&job.cond, &job.mutex)
     }
+    return job.work_count == 0
 }
 
 CommJob :: struct($T: typeid) {

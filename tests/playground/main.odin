@@ -167,7 +167,7 @@ exec_job :: proc(ctx: imp.Ctx, i: int) {
         // consumer
         data := imp.comm_job_recv(job)
         fmt.println("received data through comm job:", data)
-        imp.job_complete_step(job)
+        imp.job_complete_work(job)
     }
     imp.join(ctx)
     imp.barrier(ctx)
