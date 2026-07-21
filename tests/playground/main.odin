@@ -40,6 +40,25 @@ exec_nested_branches :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}] done", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
 }
 
+exec_join_to :: proc(ctx: imp.Ctx, i: int) {
+    ensure(imp.get_thread_count(ctx) == 8)
+    shared_ctx := imp.get_shared_ctx(ctx)
+    local_ctx := imp.get_local_ctx(ctx)
+
+    if imp.branch(ctx, 2) {
+        fmt.printfln("branch1[{}/{}]: {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), imp.get_thread_id(ctx))
+    } else if imp.branch(ctx, 2) {
+        fmt.printfln("branch2[{}/{}]: {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), imp.get_thread_id(ctx))
+    } else if imp.branch(ctx, 2) {
+        fmt.printfln("branch3[{}/{}]: {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), imp.get_thread_id(ctx))
+    } else {
+        fmt.printfln("branch4[{}/{}]: {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), imp.get_thread_id(ctx))
+    }
+    imp.join_to(ctx, local_ctx)
+    ensure(local_ctx == imp.get_local_ctx(ctx))
+    ensure(shared_ctx == imp.get_shared_ctx(ctx))
+}
+
 exec_messages :: proc(ctx: imp.Ctx, i: int) {
     ensure(imp.get_thread_count(ctx) == 4)
     buf0: [2][100]u8
@@ -226,9 +245,10 @@ run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I)
 main :: proc() {
     run_test(40, exec_branch, 1)
     run_test(40, exec_nested_branches, 2)
-    run_test(4, exec_messages, 3)
-    run_test(4, exec_sync, 4)
-    run_test(4, exec_range, 5)
-    run_test(4, exec_job, 6)
-    run_test(4, exec_loop, 7)
+    run_test(8, exec_join_to, 3)
+    run_test(4, exec_messages, 4)
+    run_test(4, exec_sync, 5)
+    run_test(4, exec_range, 6)
+    run_test(4, exec_job, 7)
+    run_test(4, exec_loop, 8)
 }
