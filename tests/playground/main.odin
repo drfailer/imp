@@ -236,7 +236,7 @@ run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I)
     ctx: imp.Global_Ctx
     imp.global_ctx_init(&ctx, thread_count)
     defer imp.global_ctx_destroy(&ctx)
-    imp.lauch(&ctx, exec, data)
+    imp.launch(&ctx, exec, data)
     if data == 2 {
         imp.prof_print_report_dot(ctx, "test.dot")
     }

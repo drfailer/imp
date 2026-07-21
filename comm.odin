@@ -2,8 +2,8 @@ package imp
 
 import "core:sync"
 import "core:mem"
-import "core:reflect"
 import "base:intrinsics"
+import "base:runtime"
 
 // Messages ////////////////////////////////////////////////////////////////////
 
@@ -36,7 +36,7 @@ comm_open :: proc(comm: ^Comm($T)) {
     sync.broadcast(&comm.cond)
 }
 
-comm_set_close :: proc(comm: ^Comm($T), closed := true) {
+comm_set_closed :: proc(comm: ^Comm($T), closed := true) {
     sync.lock(&comm.mutex)
     comm.closed = closed
     sync.unlock(&comm.mutex)
@@ -88,17 +88,19 @@ Comms :: struct($T: typeid) {
     cond: sync.Atomic_Cond,
 }
 
-comms_init :: proc(comms: ^Comms($T), channel_count: int, allocator := context.allocator) {
+comms_init_channels :: proc(comms: ^Comms($T), channel_count: int, allocator := context.allocator) {
     comms.channels = make([dynamic]Comm(T), channel_count, allocator)
     for &channel in comms.channels {
         comm_init(&channel, allocator)
     }
 }
 
-comms_init_union :: proc(comms: ^Comms($T), allocator := context.allocator) where reflect.is_union(T) {
+comms_init_union :: proc(comms: ^Comms($T), allocator := context.allocator) where intrinsics.type_is_union(T) {
     type_info := type_info_of(T)
     comms_init(comms, len(type_info.variant.(runtime.Type_Info_Union).variants), allocator)
 }
+
+comms_init :: proc{ comms_init_channels, comms_init_union }
 
 comms_destroy :: proc(comms: ^Comms($T)) {
     for &channel in comms.channels {
