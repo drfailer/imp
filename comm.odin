@@ -2,6 +2,7 @@ package imp
 
 import "core:sync"
 import "core:mem"
+import "core:reflect"
 import "base:intrinsics"
 
 // Messages ////////////////////////////////////////////////////////////////////
@@ -92,6 +93,11 @@ comms_init :: proc(comms: ^Comms($T), channel_count: int, allocator := context.a
     for &channel in comms.channels {
         comm_init(&channel, allocator)
     }
+}
+
+comms_init_union :: proc(comms: ^Comms($T), allocator := context.allocator) where reflect.is_union(T) {
+    type_info := type_info_of(T)
+    comms_init(comms, len(type_info.variant.(runtime.Type_Info_Union).variants), allocator)
 }
 
 comms_destroy :: proc(comms: ^Comms($T)) {
