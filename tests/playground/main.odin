@@ -70,8 +70,8 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
         ensure(imp.get_thread_count(ctx) == 2)
 
         text := fmt.bprintf(buf0[imp.get_thread_index(ctx)][:], "imp.branch 1 thread {}", imp.get_thread_index(ctx))
-        imp.send_data(ctx, 1 - imp.get_thread_index(ctx), imp.make_data(&text))
-        imp.send_data(ctx, branch_ctx[1], imp.get_thread_index(ctx), imp.make_data(&text))
+        imp.send_data(ctx, 1 - imp.get_thread_index(ctx), &text)
+        imp.send_data(ctx, branch_ctx[1], imp.get_thread_index(ctx), &text)
 
         for i in 0..<2 {
             data, sender, ok := imp.recv_data(ctx)
@@ -84,7 +84,7 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
                 fmt.printfln("branch0[{}/{}]: {} (remote from {})",
                     imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx),
                     imp.data_ptr(data, string)^, ~sender)
-                imp.send_data(ctx, sender, imp.make_data(&text))
+                imp.send_data(ctx, sender, &text)
             }
         }
         data, sender, ok := imp.recv_data(ctx)
@@ -97,8 +97,8 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
         ensure(imp.get_thread_count(ctx) == 2)
 
         text := fmt.bprintf(buf1[imp.get_thread_index(ctx)][:], "imp.branch 2 thread {}", imp.get_thread_index(ctx))
-        imp.send_data(ctx, 1 - imp.get_thread_index(ctx), imp.make_data(&text))
-        imp.send_data(ctx, branch_ctx[0], imp.get_thread_index(ctx), imp.make_data(&text))
+        imp.send_data(ctx, 1 - imp.get_thread_index(ctx), &text)
+        imp.send_data(ctx, branch_ctx[0], imp.get_thread_index(ctx), &text)
 
         for _ in 0..<2 {
             data, sender, ok := imp.recv_data(ctx)
@@ -111,7 +111,7 @@ exec_messages :: proc(ctx: imp.Ctx, i: int) {
                 fmt.printfln("branch1[{}/{}]: {} (remote from {})",
                     imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx),
                     imp.data_ptr(data, string)^, ~sender)
-                imp.send_data(ctx, sender, imp.make_data(&text))
+                imp.send_data(ctx, sender, &text)
             }
         }
         data, sender, ok := imp.recv_data(ctx)

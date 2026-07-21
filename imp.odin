@@ -195,6 +195,7 @@ Data :: struct {
 }
 
 data_ptr :: proc(data: Data, $T: typeid) -> ^T {
+    if data.type != T do panic("tried to unpack data from the wrong type")
     return cast(^T)data.ptr
 }
 
@@ -515,7 +516,7 @@ get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, i
     panic("unreachable")
 }
 
-send_data_parallel_ctx :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
+send_data_parallel_ctx_data :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
     shared_ctx := get_local_ctx(ctx).shared_ctx
     if thread_index >= 0 {
         // local send
@@ -528,21 +529,52 @@ send_data_parallel_ctx :: proc(ctx: Ctx, thread_index: int, data: Data, channel 
     }
 }
 
-send_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
+send_data_parallel_ctx_poly :: proc(ctx: Ctx, thread_index: int, data: ^$T, channel := 0) {
+    send_data_parallel_ctx_data(ctx, thread_index, make_data(data), channel)
+}
+
+send_data_shared_ctx_data :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
     assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
     assert(thread_index >= 0)
     receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
     comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
 }
 
-send_data :: proc{ send_data_parallel_ctx, send_data_shared_ctx }
+send_data_shared_ctx_poly :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: ^$T, channel := 0) {
+    send_data_shared_ctx_data(ctx, shared_ctx, thread_index, make_data(data), channel)
+}
 
-recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
+send_data :: proc{
+    send_data_parallel_ctx_data,
+    send_data_parallel_ctx_poly,
+    send_data_shared_ctx_data,
+    send_data_shared_ctx_poly,
+}
+
+recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
     msg, ok := comms_recv(&ctx.thread_ctx.comms, Data, channel)
     return msg.content, msg.sender_index, ok
 }
 
-try_recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
+recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int, bool) {
+    if data, sender_index, ok := recv_data_data(ctx, channel); ok {
+        return data_ptr(data, T), sender_index, ok
+    }
+    return nil, 0, false
+}
+
+recv_data :: proc{ recv_data_data, recv_data_poly }
+
+try_recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
     msg, ok := comms_try_recv(&ctx.thread_ctx.comms, Data, channel)
     return msg.content, msg.sender_index, ok
 }
+
+try_recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int, bool) {
+    if data, sender_index, ok := try_recv_data_data(ctx, channel); ok {
+        return data_ptr(data, T), sender_index, ok
+    }
+    return nil, 0, false
+}
+
+try_recv_data :: proc{ try_recv_data_data, try_recv_data_poly }
