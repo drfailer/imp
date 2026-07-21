@@ -183,6 +183,35 @@ exec_job :: proc(ctx: imp.Ctx, i: int) {
     fmt.printfln("[{}/{}] done", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx))
 }
 
+exec_loop :: proc(ctx: imp.Ctx, i: int) {
+    loop: ^imp.Remote_Index_Loop
+
+    if imp.single(ctx) {
+        loop = new(imp.Remote_Index_Loop)
+    }
+    imp.sync_val(ctx, 0, &loop)
+
+    if imp.branch(ctx, 1) {
+        for _ in 0..<10 {
+            imp.remote_index_loop_inc(loop)
+        }
+        if imp.single(ctx) {
+            imp.remote_index_loop_done(loop)
+        }
+    } else {
+        index := 0
+        for imp.remote_index_loop_step(loop, &index) {
+            fmt.printfln("[{}/{}]: {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), index)
+        }
+    }
+    imp.join(ctx)
+    imp.barrier(ctx)
+
+    if imp.single(ctx) {
+        free(loop)
+    }
+}
+
 run_test :: proc(thread_count: int, exec: proc(ctx: imp.Ctx, data: $I), data: I) {
     fmt.println("--------------")
     ctx: imp.Global_Ctx
@@ -201,4 +230,5 @@ main :: proc() {
     run_test(4, exec_sync, 4)
     run_test(4, exec_range, 5)
     run_test(4, exec_job, 6)
+    run_test(4, exec_loop, 7)
 }
