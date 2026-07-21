@@ -184,23 +184,23 @@ exec_job :: proc(ctx: imp.Ctx, i: int) {
 }
 
 exec_loop :: proc(ctx: imp.Ctx, i: int) {
-    loop: ^imp.Remote_Index_Loop
+    loop: ^imp.Index_Loop
 
     if imp.single(ctx) {
-        loop = new(imp.Remote_Index_Loop)
+        loop = new(imp.Index_Loop)
     }
     imp.sync_val(ctx, 0, &loop)
 
     if imp.branch(ctx, 1) {
         for _ in 0..<10 {
-            imp.remote_index_loop_inc(loop)
+            imp.index_loop_inc(loop)
         }
         if imp.single(ctx) {
-            imp.remote_index_loop_done(loop)
+            imp.index_loop_done(loop)
         }
     } else {
         index := 0
-        for imp.remote_index_loop_step(loop, &index) {
+        for imp.index_loop_step(loop, &index) {
             fmt.printfln("[{}/{}]: {}", imp.get_thread_index(ctx) + 1, imp.get_thread_count(ctx), index)
         }
     }

@@ -62,9 +62,9 @@ barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Sleep) {
 
 // TODO: run something by the first thread or the last thread to reach a checkpoint
 
-// Remote index ////////////////////////////////////////////////////////////////
+// Index loop //////////////////////////////////////////////////////////////////
 
-Remote_Index_Loop :: struct {
+Index_Loop :: struct {
     done: bool,
     prod_index: int,
     cons_index: int,
@@ -72,14 +72,14 @@ Remote_Index_Loop :: struct {
     mutex: sync.Atomic_Mutex,
 }
 
-remote_index_loop_reset :: proc(loop: ^Remote_Index_Loop) {
+index_loop_reset :: proc(loop: ^Index_Loop) {
     sync.guard(&loop.mutex)
     loop.prod_index = 0
     loop.cons_index = 0
     loop.done = false
 }
 
-remote_index_loop_inc :: proc(loop: ^Remote_Index_Loop, count := 1) {
+index_loop_inc :: proc(loop: ^Index_Loop, count := 1) {
     sync.atomic_add_explicit(&loop.prod_index, count, .Release)
     if count == 1 {
         sync.signal(&loop.cond)
@@ -88,14 +88,14 @@ remote_index_loop_inc :: proc(loop: ^Remote_Index_Loop, count := 1) {
     }
 }
 
-remote_index_loop_done :: proc(loop: ^Remote_Index_Loop) {
+index_loop_done :: proc(loop: ^Index_Loop) {
     sync.lock(&loop.mutex)
     loop.done = true
     sync.unlock(&loop.mutex)
     sync.broadcast(&loop.cond)
 }
 
-remote_index_loop_step :: proc(loop: ^Remote_Index_Loop, index: ^int = nil) -> bool {
+index_loop_step :: proc(loop: ^Index_Loop, index: ^int = nil) -> bool {
     next_index := sync.atomic_add_explicit(&loop.cons_index, 1, .Release)
     if index != nil do index^ = next_index
     if next_index < sync.atomic_load_explicit(&loop.prod_index, .Acquire) do return true
