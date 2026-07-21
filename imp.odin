@@ -187,14 +187,6 @@ Ctx :: struct {
     thread_ctx: ^Thread_Ctx,
 }
 
-get_local_ctx :: proc(ctx: Ctx) -> ^Local_Ctx {
-    return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
-}
-
-get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
-    return get_local_ctx(ctx).shared_ctx
-}
-
 // Data ////////////////////////////////////////////////////////////////////////
 
 Data :: struct {
@@ -226,9 +218,16 @@ get_thread_id :: proc(ctx: Ctx) -> int {
     return ctx.thread_ctx.id
 }
 
-
 get_thread_count :: proc(ctx: Ctx) -> int {
     return get_shared_ctx(ctx).thread_count
+}
+
+get_local_ctx :: proc(ctx: Ctx) -> ^Local_Ctx {
+    return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
+}
+
+get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
+    return get_local_ctx(ctx).shared_ctx
 }
 
 // single //////////////////////////////
