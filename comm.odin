@@ -60,8 +60,7 @@ comm_send :: proc(comm: ^Comm($T), m: Message(T)) {
 }
 
 comm_recv :: proc(comm: ^Comm($T)) -> (m: Message(T), ok: bool) {
-    sync.lock(&comm.mutex)
-    defer sync.unlock(&comm.mutex)
+    sync.guard(&comm.mutex)
     for {
         if m, ok = queue_pop(&comm.queue); ok {
             return m, true
