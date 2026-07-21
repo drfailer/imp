@@ -231,6 +231,12 @@ get_thread_count :: proc(ctx: Ctx) -> int {
     return get_shared_ctx(ctx).thread_count
 }
 
+// single //////////////////////////////
+
+single :: proc(ctx: Ctx, index := 0) -> bool {
+    return get_thread_index(ctx) == index
+}
+
 // barrier /////////////////////////////
 
 barrier :: proc(ctx: Ctx, kind := BarrierKind.Spin) {
