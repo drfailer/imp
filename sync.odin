@@ -54,6 +54,61 @@ barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Sleep) {
     }
 }
 
+// Remote barrier //////////////////////////////////////////////////////////////
+
+// TODO: barrier controllable from another thread
+
+// First & Last ////////////////////////////////////////////////////////////////
+
+// TODO: run something by the first thread or the last thread to reach a checkpoint
+
+// Remote index ////////////////////////////////////////////////////////////////
+
+Remote_Index_Loop :: struct {
+    done: bool,
+    prod_index: int,
+    cons_index: int,
+    cond: sync.Atomic_Cond,
+    mutex: sync.Atomic_Mutex,
+}
+
+remote_index_loop_reset :: proc(loop: ^Remote_Index_Loop) {
+    sync.guard(&loop.mutex)
+    loop.prod_index = 0
+    loop.cons_index = 0
+    loop.done = false
+}
+
+remote_index_loop_inc :: proc(loop: ^Remote_Index_Loop, count := 1) {
+    sync.atomic_add_explicit(&loop.prod_index, count, .Release)
+    if count == 1 {
+        sync.signal(&loop.cond)
+    } else {
+        sync.broadcast(&loop.cond)
+    }
+}
+
+remote_index_loop_done :: proc(loop: ^Remote_Index_Loop) {
+    sync.lock(&loop.mutex)
+    loop.done = true
+    sync.unlock(&loop.mutex)
+    sync.broadcast(&loop.cond)
+}
+
+remote_index_loop_step :: proc(loop: ^Remote_Index_Loop, index: ^int = nil) -> bool {
+    next_index := sync.atomic_add_explicit(&loop.cons_index, 1, .Release)
+    if index != nil do index^ = next_index
+    if next_index < sync.atomic_load_explicit(&loop.prod_index, .Acquire) do return true
+
+    sync.guard(&loop.mutex)
+    for {
+        if next_index < sync.atomic_load_explicit(&loop.prod_index, .Acquire) do break
+        if loop.done do return false // we exit the loop only when the max is reached
+        sync.wait(&loop.cond, &loop.mutex)
+    }
+    return true
+}
+
 // Job /////////////////////////////////////////////////////////////////////////
 
 Job :: struct {
