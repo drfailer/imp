@@ -94,6 +94,7 @@ alloc_shared_ctx :: proc(ctx: ^Global_Ctx) -> ^Shared_Ctx {
     }
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
     shared_ctx := new(Shared_Ctx, allocator)
+    shared_ctx.thread_index_map = make([dynamic]^Thread_Ctx, allocator = allocator)
     return shared_ctx
 }
 
@@ -358,7 +359,7 @@ reduce :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
 
 Branch_Ctx :: distinct [2]^Shared_Ctx
 
-branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bool {
+branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bool {
     parent_local := get_local_ctx(ctx)
     parent_ctx := parent_local.shared_ctx
 
@@ -394,7 +395,7 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
             node0 := alloc_shared_ctx(ctx.global_ctx)
             node1 := alloc_shared_ctx(ctx.global_ctx)
 
-            node0.thread_count = right_thread_count
+            node0.thread_count = thread_count
             clear(&node0.thread_index_map)
             resize(&node0.thread_index_map, node0.thread_count)
             barrier_init(&node0.barrier, node0.thread_count)
@@ -402,7 +403,7 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
             node0.branch.fini_counter = node0.thread_count
             node0.parent = parent_ctx
 
-            node1.thread_count = parent_ctx.thread_count - right_thread_count
+            node1.thread_count = parent_ctx.thread_count - thread_count
             clear(&node1.thread_index_map)
             resize(&node1.thread_index_map, node1.thread_count)
             barrier_init(&node1.barrier, node1.thread_count)
@@ -458,7 +459,7 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
     parent_local.branch_generation = my_expected_gen
 
     // =========================================================================
-    // ASAP RESET: Last thread to arrive cleans the slate
+    // ASAP RESET: Last thread to arrive cleans the state
     // =========================================================================
     arrivals := sync.atomic_add_explicit(&parent_ctx.branch.arrival_counter, 1, .Relaxed)
     if arrivals == parent_ctx.thread_count - 1 {
@@ -476,10 +477,28 @@ branch :: proc(ctx: Ctx, right_thread_count: int, branch_ctx: ^Branch_Ctx = nil)
     return new_local.shared_ctx == ctx0
 }
 
+// FIXME: the last thread of each branch should not release the ctx, but the
+// last thread of the parent branch (last thread overall) should release both
+// branches
 join :: proc(ctx: Ctx) {
     cur_ctx := get_shared_ctx(ctx)
+    parent_ctx := cur_ctx.parent
+
     prev_count := sync.atomic_sub_explicit(&cur_ctx.branch.fini_counter, 1, .Relaxed)
     if prev_count == 1 {
+        // =========================================================================
+        // WAIT RESET: if a branch is too quick, we prenvent threads to release any
+        // of the branches states before all the threads of the parent context are
+        // setup
+        // =========================================================================
+        for {
+            if sync.atomic_load_explicit(&parent_ctx.branch.ctxs[0], .Acquire) == nil &&
+               sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire) == nil {
+                break
+            }
+            sync.guard(&parent_ctx.mutex)
+            sync.wait(&parent_ctx.cond, &parent_ctx.mutex)
+        }
         release_shared_ctx(ctx.global_ctx, cur_ctx)
     }
     pop(&ctx.thread_ctx.ctx_stack)
