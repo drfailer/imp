@@ -174,10 +174,10 @@ exec_range :: proc(ctx: imp.Ctx, i: int) {
 
 exec_job :: proc(ctx: imp.Ctx, i: int) {
     ensure(imp.get_thread_count(ctx) == 4)
-    job: ^imp.CommJob(int)
+    job: ^imp.Comm_Job(int)
 
     if imp.get_thread_index(ctx) == 0 {
-        job = new(imp.CommJob(int))
+        job = new(imp.Comm_Job(int))
         imp.comm_job_init(job, 2)
     }
     imp.sync_val(ctx, 0, &job)

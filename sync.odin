@@ -167,31 +167,31 @@ job_wait_update :: proc(job: ^Job) -> bool {
     return job.work_count == 0
 }
 
-CommJob :: struct($T: typeid) {
+Comm_Job :: struct($T: typeid) {
     using job: Job,
     comm: Comm(T),
 }
 
-comm_job_init :: proc(job: ^CommJob($T), work_count := 1, allocator := context.allocator) {
+comm_job_init :: proc(job: ^Comm_Job($T), work_count := 1, allocator := context.allocator) {
     job_init(job, work_count)
     comm_init(&job.comm)
 }
 
-comm_job_destroy :: proc(job: ^CommJob($T)) {
+comm_job_destroy :: proc(job: ^Comm_Job($T)) {
     comm_destroy(&job.comm)
 }
 
-comm_job_send :: proc(job: ^CommJob($T), data: T) {
+comm_job_send :: proc(job: ^Comm_Job($T), data: T) {
     comm_send(&job.comm, Message(int){0, data})
 }
 
-comm_job_recv :: proc(job: ^CommJob($T)) -> T {
+comm_job_recv :: proc(job: ^Comm_Job($T)) -> T {
     msg, ok := comm_recv(&job.comm)
     ensure(ok, "communicator should not be closed for jobs")
     return msg.content
 }
 
-comm_job_try_recv :: proc(job: ^CommJob($T)) -> (T, bool) {
+comm_job_try_recv :: proc(job: ^Comm_Job($T)) -> (T, bool) {
     msg, ok := comm_try_recv(&job.comm)
     return msg.content, ok
 }
