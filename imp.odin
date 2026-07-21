@@ -498,21 +498,51 @@ join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
 // as identifier and make it negative so that the receiver can know.
 //
 
+@(private)
+get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, index: int) -> ^Thread_Ctx {
+    if index < 0 || index >= ctx.thread_count {
+        panic("the target thread does not exist")
+    }
+
+    // threads going into a branch do not wait for the other threads so we need
+    // to wait for the thread_data to be available if the initialization is not
+    // done yet (most of the time, thread won't wait).
+    for {
+        thread_data := sync.atomic_load_explicit(&ctx.thread_index_map[index], .Acquire)
+        if thread_data != nil do return thread_data
+        intrinsics.cpu_relax()
+    }
+    panic("unreachable")
+}
+
 send_data_parallel_ctx :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
-    send_message_parallel_ctx(ctx, thread_index, channel, data)
+    shared_ctx := get_local_ctx(ctx).shared_ctx
+    if thread_index >= 0 {
+        // local send
+        receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
+        comms_send(&receiver_data.comms, Message(Data){get_thread_index(ctx), data}, channel)
+    } else {
+        // global send
+        receiver_data := &ctx.global_ctx.thread_ctxs[~thread_index]
+        comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
+    }
 }
 
 send_data_shared_ctx :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
-    send_message_shared_ctx(ctx, shared_ctx, thread_index, channel, data)
+    assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
+    assert(thread_index >= 0)
+    receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
+    comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
 }
 
 send_data :: proc{ send_data_parallel_ctx, send_data_shared_ctx }
 
 recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    return recv_message(ctx, channel, Data)
+    msg, ok := comms_recv(&ctx.thread_ctx.comms, Data, channel)
+    return msg.content, msg.sender_index, ok
 }
 
-try_recv_data :: proc(ctx: Ctx, comm: ^Comm($T)) -> (data: T, ok: bool) {
-    if msg, ok := comm_try_recv(comm); ok do return msg.content, true
-    return
+try_recv_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
+    msg, ok := comms_try_recv(&ctx.thread_ctx.comms, Data, channel)
+    return msg.content, msg.sender_index, ok
 }
