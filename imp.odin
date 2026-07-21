@@ -114,7 +114,7 @@ release_shared_ctx :: proc(ctx: ^Global_Ctx, shared_ctx: ^Shared_Ctx) {
 
 Thread_Ctx :: struct {
     id: int,
-    comms: Comms,
+    comms: Comms(Message(Data)),
     ctx_stack: [dynamic]Local_Ctx,
     profiler: ^Profiler,
 }
@@ -552,7 +552,7 @@ send_data :: proc{
 }
 
 recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    msg, ok := comms_recv(&ctx.thread_ctx.comms, Data, channel)
+    msg, ok := comms_recv(&ctx.thread_ctx.comms, channel)
     return msg.content, msg.sender_index, ok
 }
 
@@ -566,7 +566,7 @@ recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int
 recv_data :: proc{ recv_data_data, recv_data_poly }
 
 try_recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    msg, ok := comms_try_recv(&ctx.thread_ctx.comms, Data, channel)
+    msg, ok := comms_try_recv(&ctx.thread_ctx.comms, channel)
     return msg.content, msg.sender_index, ok
 }
 
