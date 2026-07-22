@@ -47,8 +47,7 @@ Dgemm_Data :: struct {
     comms: struct {
         product_state: imp.Comms(union { ^Tile_A, ^Tile_B }),
         sum_state: imp.Comms(union { ^Tile_C, Product_Data, Sum_Data }),
-        product_task: imp.Comm(Product_Data),
-        sum_task: imp.Comm(Sum_Data),
+        tasks: imp.Comms(union { Product_Data, Sum_Data })
     }
 }
 
@@ -73,8 +72,7 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     imp.pool_init(&data.tile_pools[3], 2000, init_p_tile, data)
     imp.comms_init(&data.comms.product_state)
     imp.comms_init(&data.comms.sum_state)
-    imp.comm_init(&data.comms.product_task)
-    imp.comm_init(&data.comms.sum_task)
+    imp.comms_init(&data.comms.tasks)
 
     data.product_state.a_tiles = make([dynamic]^Matrix_Tile, data.TM * data.TK)
     data.product_state.b_tiles = make([dynamic]^Matrix_Tile, data.TK * data.TN)
@@ -88,8 +86,8 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
     imp.pool_destroy(&data.tile_pools[3])
     imp.comms_destroy(&data.comms.product_state)
     imp.comms_destroy(&data.comms.sum_state)
-    imp.comm_destroy(&data.comms.product_task)
-    imp.comm_destroy(&data.comms.sum_task)
+    imp.comms_destroy(&data.comms.tasks)
+
     log.destroy_console_logger(data.logger)
 
     delete(data.sum_state.queues)
@@ -118,7 +116,7 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             switch thread_index {
             case 0: imp.comms_send(&data.comms.product_state, cast(^Tile_A)tile)
             case 1: imp.comms_send(&data.comms.product_state, cast(^Tile_B)tile)
-            case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile)
+            case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile, 0)
             }
         }
     }
@@ -138,7 +136,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         p.cols = b.rows
         p.row_idx = a.row_idx
         p.col_idx = b.col_idx
-        imp.comm_send(&data.comms.product_task, Product_Data{a, b, p})
+        imp.comms_send(&data.comms.tasks, Product_Data{a, b, p}, 1)
     }
 
     TM := data.TM
@@ -173,18 +171,6 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     }
 }
 
-product_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
-    imp.prof_procedure(ctx)
-
-    for {
-        imp.prof_region(ctx, "product_task_dequeue_compute")
-        tiles := imp.comm_recv(&data.comms.product_task) or_break
-        imp.prof_region(ctx, "product_task_compute")
-        common.dot(tiles.a, tiles.b, tiles.p)
-        imp.comms_send(&data.comms.sum_state, tiles)
-    }
-}
-
 sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
 
@@ -210,7 +196,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[c.row_idx * TN + c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
-                imp.comm_send(&data.comms.sum_task, Sum_Data{c = c, p = p})
+                imp.comms_send(&data.comms.tasks, Sum_Data{c = c, p = p})
             } else {
                 q.c = c
             }
@@ -224,7 +210,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[p.row_idx * TN + p.col_idx]
             if q.c != nil {
-                imp.comm_send(&data.comms.sum_task, Sum_Data{c = q.c, p = p})
+                imp.comms_send(&data.comms.tasks, Sum_Data{c = q.c, p = p})
             } else {
                 queue.enqueue(&q.ps, p)
             }
@@ -244,7 +230,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[value.c.row_idx * TN + value.c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
-                imp.comm_send(&data.comms.sum_task, Sum_Data{c = value.c, p = p})
+                imp.comms_send(&data.comms.tasks, Sum_Data{c = value.c, p = p})
             } else {
                 q.c = value.c
             }
@@ -252,15 +238,20 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     }
 }
 
-sum_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
 
     for {
-        imp.prof_region(ctx, "sum_task_dequeue_compute")
-        tiles := imp.comm_recv(&data.comms.sum_task) or_break
-        log.debugf("sum_task: C[{},{}]", tiles.c.row_idx, tiles.c.col_idx)
+        imp.prof_region(ctx, "tasks_dequeue_compute")
+        udata := imp.comms_recv(&data.comms.tasks) or_break
 
-        if imp.prof_region(ctx, "sum_task_compute") {
+        switch tiles in udata {
+        case Product_Data:
+            imp.prof_region(ctx, "product_task")
+            common.dot(tiles.a, tiles.b, tiles.p)
+            imp.comms_send(&data.comms.sum_state, tiles)
+        case Sum_Data:
+            imp.prof_region(ctx, "sum_task")
             c := tiles.c
             p := tiles.p
             for row in 0..<tiles.c.rows {
@@ -268,9 +259,7 @@ sum_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                     c.data[row * c.ld + col] += p.data[row * p.ld + col]
                 }
             }
-            if imp.prof_region(ctx, "sum_task_send") {
-                imp.comms_send(&data.comms.sum_state, tiles)
-            }
+            imp.comms_send(&data.comms.sum_state, tiles)
         }
     }
 }
@@ -281,13 +270,11 @@ sum_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     fmt.println("terminate")
     imp.comms_set_closed(&data.comms.sum_state)
-    imp.comm_set_closed(&data.comms.product_task)
-    imp.comm_set_closed(&data.comms.sum_task)
+    imp.comms_set_closed(&data.comms.tasks)
 }
 
 dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
-    ensure(imp.get_thread_count(ctx) > (3 + 1 + 1 + 40))
     context.logger = data.logger
 
     run_sum_task := true
@@ -298,14 +285,10 @@ dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     } else if imp.branch(ctx, 1) {
         product_state(ctx, data)
     } else if imp.branch(ctx, 1) {
-        run_sum_task = false
         sum_state(ctx, data)
-    } else if imp.branch(ctx, 40) {
-        run_sum_task = false
-        product_task(ctx, data)
     }
     imp.join_to(ctx, local_ctx)
-    if run_sum_task do sum_task(ctx, data)
+    tasks(ctx, data)
 }
 
 dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
@@ -316,7 +299,7 @@ dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
     context.logger = data.logger
 
     global_ctx: imp.Global_Ctx
-    imp.global_ctx_init(&global_ctx, 55)
+    imp.global_ctx_init(&global_ctx, 40)
     defer imp.global_ctx_destroy(&global_ctx)
     imp.launch(&global_ctx, dgemm_parallel, &data)
 
@@ -375,7 +358,7 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
 
 main :: proc() {
     MATRIX_SIZE :: 20000
-    TILE_SIZE :: 1024
+    TILE_SIZE :: 2048
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
