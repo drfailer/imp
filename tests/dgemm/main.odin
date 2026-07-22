@@ -7,6 +7,7 @@ import "core:mem"
 import "core:log"
 import "core:container/queue"
 import "core:fmt"
+import "core:time"
 
 Matrix :: common.Matrix
 Matrix_Tile :: common.Matrix_Tile
@@ -32,6 +33,7 @@ Sum_Queue :: struct {
 Dgemm_Data :: struct {
     logger: log.Logger,
     A, B, C: Matrix,
+    TM, TN, TK: uint,
     tile_pools: [4]imp.Pool(Matrix_Tile),
     tile_cols, tile_rows: uint,
     product_state: struct {
@@ -57,19 +59,26 @@ init_p_tile :: proc(tile: ^Matrix_Tile, data: rawptr, allocator: mem.Allocator) 
 
 dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows: uint) {
     data.logger = log.create_console_logger(.Error, {.Level, .Short_File_Path, .Line, .Procedure, .Terminal_Color, .Thread_Id})
+    data.TM = C.rows / tile_rows + (C.rows % tile_rows == 0 ? 0 : 1)
+    data.TN = C.cols / tile_cols + (C.cols % tile_cols == 0 ? 0 : 1)
+    data.TK = A.cols / tile_cols + (A.cols % tile_cols == 0 ? 0 : 1)
     data.A = A
     data.B = B
     data.C = C
     data.tile_cols = tile_cols
     data.tile_rows = tile_rows
-    imp.pool_init(&data.tile_pools[0], 1000)
-    imp.pool_init(&data.tile_pools[1], 1000)
-    imp.pool_init(&data.tile_pools[2], 1000)
+    imp.pool_init(&data.tile_pools[0], data.TM * data.TK)
+    imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
+    imp.pool_init(&data.tile_pools[2], data.TM * data.TM)
     imp.pool_init(&data.tile_pools[3], 2000, init_p_tile, data)
     imp.comms_init(&data.comms.product_state)
     imp.comms_init(&data.comms.sum_state)
     imp.comm_init(&data.comms.product_task)
     imp.comm_init(&data.comms.sum_task)
+
+    data.product_state.a_tiles = make([dynamic]^Matrix_Tile, data.TM * data.TK)
+    data.product_state.b_tiles = make([dynamic]^Matrix_Tile, data.TK * data.TN)
+    data.sum_state.queues = make([dynamic]Sum_Queue, data.TM * data.TN)
 }
 
 dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
@@ -82,6 +91,10 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
     imp.comm_destroy(&data.comms.product_task)
     imp.comm_destroy(&data.comms.sum_task)
     log.destroy_console_logger(data.logger)
+
+    delete(data.sum_state.queues)
+    delete(data.product_state.a_tiles)
+    delete(data.product_state.b_tiles)
 }
 
 split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
@@ -97,7 +110,7 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for row : uint = 0; row < m.rows; row += data.tile_rows {
         for col : uint = 0; col < m.cols; col += data.tile_cols {
-            tile, ok := imp.pool_alloc(&data.tile_pools[thread_index], .Dynamic)
+            tile, ok := imp.pool_alloc(&data.tile_pools[thread_index])
             assert(ok)
             common.matrix_tile_init(tile, m, row, col, row / data.tile_rows, col / data.tile_cols,
                                     min(data.tile_rows, m.rows - row),
@@ -108,6 +121,10 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile)
             }
         }
+    }
+    imp.barrier(ctx)
+    if thread_index == 0 {
+        imp.comms_set_closed(&data.comms.product_state)
     }
 }
 
@@ -124,13 +141,15 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         imp.comm_send(&data.comms.product_task, Product_Data{a, b, p})
     }
 
-    TM := data.C.rows / data.tile_rows + (data.C.rows % data.tile_rows == 0 ? 0 : 1)
-    TN := data.C.cols / data.tile_cols + (data.C.cols % data.tile_cols == 0 ? 0 : 1)
-    TK := data.A.cols / data.tile_cols + (data.A.cols % data.tile_cols == 0 ? 0 : 1)
+    TM := data.TM
+    TN := data.TN
+    TK := data.TK
 
     for {
+        imp.prof_region(ctx, "product_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.product_state) or_break
 
+        imp.prof_region(ctx, "product_state_compute")
         switch value in udata {
         case ^Tile_A:
             a := cast(^Matrix_Tile)value
@@ -158,7 +177,9 @@ product_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
 
     for {
+        imp.prof_region(ctx, "product_task_dequeue_compute")
         tiles := imp.comm_recv(&data.comms.product_task) or_break
+        imp.prof_region(ctx, "product_task_compute")
         common.dot(tiles.a, tiles.b, tiles.p)
         imp.comms_send(&data.comms.sum_state, tiles)
     }
@@ -167,9 +188,9 @@ product_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
 
-    TM := data.C.rows / data.tile_rows + (data.C.rows % data.tile_rows == 0 ? 0 : 1)
-    TN := data.C.cols / data.tile_cols + (data.C.cols % data.tile_cols == 0 ? 0 : 1)
-    TK := data.A.cols / data.tile_cols + (data.A.cols % data.tile_cols == 0 ? 0 : 1)
+    TM := data.TM
+    TN := data.TN
+    TK := data.TK
 
     if imp.single(ctx) {
         data.sum_state.progress_counter = TM * TN * TK
@@ -177,8 +198,10 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.barrier(ctx)
 
     for {
+        imp.prof_region(ctx, "sum_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.sum_state) or_break
 
+        imp.prof_region(ctx, "sum_state_compute")
         switch value in udata {
         case ^Tile_C:
             c := cast(^Matrix_Tile)value
@@ -233,17 +256,22 @@ sum_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
 
     for {
+        imp.prof_region(ctx, "sum_task_dequeue_compute")
         tiles := imp.comm_recv(&data.comms.sum_task) or_break
         log.debugf("sum_task: C[{},{}]", tiles.c.row_idx, tiles.c.col_idx)
 
-        c := tiles.c
-        p := tiles.p
-        for row in 0..<tiles.c.rows {
-            for col in 0..<tiles.c.cols {
-                c.data[row * c.ld + col] += p.data[row * p.ld + col]
+        if imp.prof_region(ctx, "sum_task_compute") {
+            c := tiles.c
+            p := tiles.p
+            for row in 0..<tiles.c.rows {
+                for col in 0..<tiles.c.cols {
+                    c.data[row * c.ld + col] += p.data[row * p.ld + col]
+                }
+            }
+            if imp.prof_region(ctx, "sum_task_send") {
+                imp.comms_send(&data.comms.sum_state, tiles)
             }
         }
-        imp.comms_send(&data.comms.sum_state, tiles)
     }
 }
 
@@ -253,50 +281,31 @@ sum_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     fmt.println("terminate")
     imp.comms_set_closed(&data.comms.sum_state)
-    imp.comms_set_closed(&data.comms.product_state)
     imp.comm_set_closed(&data.comms.product_task)
     imp.comm_set_closed(&data.comms.sum_task)
 }
 
 dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
-
-    if imp.single(ctx) {
-        TM := data.C.rows / data.tile_rows + (data.C.rows % data.tile_rows == 0 ? 0 : 1)
-        TN := data.C.cols / data.tile_cols + (data.C.cols % data.tile_cols == 0 ? 0 : 1)
-        TK := data.A.cols / data.tile_cols + (data.A.cols % data.tile_cols == 0 ? 0 : 1)
-        data.product_state.a_tiles = make([dynamic]^Matrix_Tile, TM * TK)
-        data.product_state.b_tiles = make([dynamic]^Matrix_Tile, TK * TN)
-        data.sum_state.queues = make([dynamic]Sum_Queue, TM * TN)
-    }
-    imp.barrier(ctx)
-
     ensure(imp.get_thread_count(ctx) > (3 + 1 + 1 + 40))
     context.logger = data.logger
+
+    run_sum_task := true
+
     local_ctx := imp.get_local_ctx(ctx)
     if imp.branch(ctx, 3) {
         split_task(ctx, data)
     } else if imp.branch(ctx, 1) {
-        if imp.single(ctx) do log.info("product_state:", imp.get_thread_count(ctx))
         product_state(ctx, data)
     } else if imp.branch(ctx, 1) {
-        if imp.single(ctx) do log.info("sum_state:", imp.get_thread_count(ctx))
+        run_sum_task = false
         sum_state(ctx, data)
     } else if imp.branch(ctx, 40) {
-        if imp.single(ctx) do log.info("product_task:", imp.get_thread_count(ctx))
+        run_sum_task = false
         product_task(ctx, data)
-    } else {
-        if imp.single(ctx) do log.info("sum_task:", imp.get_thread_count(ctx))
-        sum_task(ctx, data)
     }
     imp.join_to(ctx, local_ctx)
-
-    imp.barrier(ctx)
-    if imp.single(ctx) {
-        delete(data.sum_state.queues)
-        delete(data.product_state.a_tiles)
-        delete(data.product_state.b_tiles)
-    }
+    if run_sum_task do sum_task(ctx, data)
 }
 
 dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
@@ -365,12 +374,8 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
 }
 
 main :: proc() {
-    prof: imp.Profiler
-    imp.profiler_init(&prof)
-    defer imp.profiler_destroy(&prof)
-
-    MATRIX_SIZE :: 10000
-    TILE_SIZE :: 512
+    MATRIX_SIZE :: 20000
+    TILE_SIZE :: 1024
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
@@ -378,17 +383,34 @@ main :: proc() {
     defer common.matrix_destroy(&B)
     common.matrix_init(&C, 2, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&C)
-    common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
-    defer common.matrix_destroy(&E)
+    // common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
+    // defer common.matrix_destroy(&E)
 
     common.matrix_build(&A, .Float)
     common.matrix_build(&B, .Float)
 
-    if imp.prof_region(&prof, "cblas") do common.dot(A, B, E)
+
+    fmt.printfln("MATRIX_SIZE = {}, TILE_SIZE = {}", MATRIX_SIZE, TILE_SIZE)
+
+    // {
+    //     sw: time.Stopwatch
+    //     time.stopwatch_start(&sw)
+    //     common.dot(A, B, E)
+    //     time.stopwatch_stop(&sw)
+    //     fmt.printfln("bcblas: {}", time.stopwatch_duration(sw))
+    // }
+
     cblas.openblas_set_num_threads(1)
-    if imp.prof_region(&prof, "dgemm") do dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
-    if imp.prof_region(&prof, "comp") do commpare_matrices(C, E)
-    imp.prof_print_report(prof)
+
+    {
+        sw: time.Stopwatch
+        time.stopwatch_start(&sw)
+        dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
+        time.stopwatch_stop(&sw)
+        fmt.printfln("dgemm: {}", time.stopwatch_duration(sw))
+    }
+
+    // commpare_matrices(C, E)
 
     if  MATRIX_SIZE < 16 {
         common.matrix_print(A, "A")
