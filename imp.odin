@@ -30,11 +30,13 @@ Global_Ctx :: struct {
 
 DEFAULT_CONTEXT_CAPACITY :: #config(IMP_DEFAULT_CONTEXT_CAPACITY, 64)
 DEFAULT_SHARED_CTX_POOL_SIZE :: #config(IMP_DEFAULT_SHARED_CTX_POOL_SIZE, 16)
+DEFAULT_THREAD_SCRATCH_MEMORY_SIZE :: #config(IMP_DEFAULT_THREAD_SCRATCH_MEMORY_SIZE, 1024*4)
 
 global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int,
                         comm_channel_count := 1,
                         shared_ctx_pool_capacity := DEFAULT_SHARED_CTX_POOL_SIZE,
-                        thread_ctx_stack_capacity := DEFAULT_CONTEXT_CAPACITY) {
+                        thread_ctx_stack_capacity := DEFAULT_CONTEXT_CAPACITY,
+                        thread_scratch_memory_size := DEFAULT_THREAD_SCRATCH_MEMORY_SIZE) {
     mem.dynamic_arena_init(&ctx.arena)
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
 
@@ -53,7 +55,8 @@ global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int,
     // Create Threads
     ctx.thread_ctxs = make([dynamic]Thread_Ctx, thread_count, allocator)
     for &tctx, idx in ctx.thread_ctxs {
-        thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, comm_channel_count, ctx.shared.root, allocator)
+        thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, comm_channel_count,
+                        thread_scratch_memory_size, ctx.shared.root, allocator)
     }
 
     when PROFILER_ENABLED {
@@ -118,20 +121,24 @@ Thread_Ctx :: struct {
     comms: Comms(Message(Data)),
     ctx_stack: [dynamic]Local_Ctx,
     profiler: ^Profiler,
+    scratch_memory: mem.Scratch,
 }
 
 thread_ctx_init :: proc(ctx: ^Thread_Ctx, index,
                         ctx_stack_capacity, comm_channel_count: int,
+                        scratch_memory_size: int,
                         shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
     ctx.id = index
     comms_init(&ctx.comms, comm_channel_count, allocator)
     ctx.ctx_stack = make([dynamic]Local_Ctx, 1, ctx_stack_capacity + 1, allocator)
     ctx.ctx_stack[0] = Local_Ctx{ shared_ctx = shared_ctx, thread_index = index }
+    mem.scratch_init(&ctx.scratch_memory, scratch_memory_size, allocator)
 }
 
 thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
     comms_destroy(&ctx.comms)
     delete(ctx.ctx_stack)
+    mem.scratch_destroy(&ctx.scratch_memory)
 }
 
 //
@@ -230,6 +237,10 @@ get_local_ctx :: proc(ctx: Ctx) -> ^Local_Ctx {
 
 get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
     return get_local_ctx(ctx).shared_ctx
+}
+
+get_scratch_allocator :: proc(ctx: Ctx) -> mem.Allocator {
+    return mem.scratch_allocator(&ctx.thread_ctx.scratch_memory)
 }
 
 // single //////////////////////////////
