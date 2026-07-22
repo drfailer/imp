@@ -17,8 +17,8 @@ Message :: struct($T: typeid) {
 Comm :: struct($T: typeid) {
     closed: bool,
     queue: LockQueue(T),
-    cond: sync.Atomic_Cond,
-    mutex: sync.Atomic_Mutex,
+    cond: sync.Cond,
+    mutex: sync.Mutex,
 }
 
 comm_init :: proc(comm: ^Comm($T), allocator := context.allocator) {
@@ -84,8 +84,8 @@ ANY_CHANNEL :: -1
 Comms :: struct($T: typeid) {
     closed: bool,
     channels: [dynamic]Comm(T),
-    mutex: sync.Atomic_Mutex,
-    cond: sync.Atomic_Cond,
+    mutex: sync.Mutex,
+    cond: sync.Cond,
 }
 
 comms_init_channels :: proc(comms: ^Comms($T), channel_count: int, allocator := context.allocator) {
@@ -143,9 +143,10 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL) -> (data: T, recei
             for &channel in comms.channels {
                 if data, ok := comm_try_recv(&channel); ok do return data, true
             }
-            sync.guard(&comms.mutex)
-            if comms.closed do return data, false
-            sync.wait(&comms.cond, &comms.mutex)
+            if sync.guard(&comms.mutex) {
+                if comms.closed do return data, false
+                sync.wait(&comms.cond, &comms.mutex)
+            }
         }
     }
     return comm_recv(&comms.channels[channel])

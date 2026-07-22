@@ -68,8 +68,8 @@ Index_Loop :: struct {
     done: bool,
     prod_index: int,
     cons_index: int,
-    cond: sync.Atomic_Cond,
-    mutex: sync.Atomic_Mutex,
+    cond: sync.Cond,
+    mutex: sync.Mutex,
 }
 
 index_loop_reset :: proc(loop: ^Index_Loop) {
@@ -112,8 +112,8 @@ index_loop_step :: proc(loop: ^Index_Loop, index: ^int = nil) -> bool {
 // Job /////////////////////////////////////////////////////////////////////////
 
 Job :: struct {
-    mutex: sync.Atomic_Mutex,
-    cond: sync.Atomic_Cond,
+    mutex: sync.Mutex,
+    cond: sync.Cond,
     work_count: int,
 }
 
