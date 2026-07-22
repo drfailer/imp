@@ -18,11 +18,13 @@ Profiler :: struct {
     entries: map[string]Profile_Entry,
     stack: [dynamic; PROF_MAX_STACK_SIZE]string,
     stack_overflow_counter: uint,
+    stopwatch: time.Stopwatch,
 }
 
 profiler_init :: proc(profiler: ^Profiler, allocator := context.allocator) {
     profiler.entries = make(map[string]Profile_Entry, allocator)
     append(&profiler.stack, "root")
+    time.stopwatch_start(&profiler.stopwatch)
 }
 
 profiler_destroy :: proc(profiler: ^Profiler) {
@@ -249,9 +251,31 @@ prof_print_report_dot :: proc(ctx: Global_Ctx, filename: string) {
     fmt.fprintfln(file, "}")
 }
 
+prof_print_report :: proc(profiler: Profiler) {
+    global_dur := time.stopwatch_duration(profiler.stopwatch)
+
+    for entry_name, entry in profiler.entries {
+        avg_dur := time.Duration(f64(entry.ttl) / f64(entry.count))
+        ratio   := f64(entry.ttl) / f64(global_dur)
+        percent := 100 * ratio
+
+        fmt.printfln("- {}: count = {}, avg = {}, min = {}, max = {}, ttl = {} ({:.3f}%%)",
+            entry_name, entry.count, avg_dur, entry.min, entry.max, entry.ttl, percent)
+
+        for parent_name, parent_info in entry.parents {
+            parent_entry, parent_found := &profiler.entries[parent_name]
+            parent_ttl := parent_entry.ttl if parent_found else global_dur
+            percent := 100 * (f64(entry.ttl) / f64(parent_ttl))
+            fmt.printfln("  - {} -> {}: x {} / {:.3f}%%",
+                parent_name, entry_name, parent_info.call_count, percent)
+        }
+    }
+}
+
 } else {
 
 // Stubs for when the profiler is disabled
 prof_print_report_dot :: proc(ctx: Global_Ctx, filename: string) {}
+prof_print_report :: proc(ctx: Global_Ctx) {}
 
 }
