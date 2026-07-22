@@ -16,7 +16,8 @@ Message :: struct($T: typeid) {
 
 Comm :: struct($T: typeid) {
     closed: bool,
-    queue: LockQueue(T),
+    // queue: LockQueue(T),
+    queue: MPMC_Queue(T, 1024),
     cond: sync.Cond,
     mutex: sync.Mutex,
 }
@@ -56,20 +57,23 @@ comm_wait_open :: proc(comm: ^Comm($T)) {
 }
 
 comm_send :: proc(comm: ^Comm($T), m: T) {
-    sync.lock(&comm.mutex)
     queue_push(&comm.queue, m)
-    sync.unlock(&comm.mutex)
     sync.signal(&comm.cond)
 }
 
-comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
+comm_wait :: proc(comm: ^Comm($T)) -> bool {
     sync.guard(&comm.mutex)
+    if comm.closed do return false
+    sync.wait(&comm.cond, &comm.mutex)
+    return comm.closed == false
+}
+
+comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
     for {
         if m, ok = queue_pop(&comm.queue); ok {
             return m, true
         }
-        if comm.closed do return m, false
-        sync.wait(&comm.cond, &comm.mutex)
+        comm_wait(comm) or_return
     }
 }
 
@@ -133,8 +137,14 @@ comms_wait_open :: proc(comms: ^Comms($T)) {
 
 comms_send :: proc(comms: ^Comms($T), data: T, channel := 0) {
     comm_send(&comms.channels[channel], data)
-    sync.guard(&comms.mutex) // we need to guard here to avoid lost wakeups
     sync.signal(&comms.cond)
+}
+
+comms_wait :: proc(comms: ^Comms($T)) -> bool {
+    sync.guard(&comms.mutex)
+    if comms.closed do return false
+    sync.wait(&comms.cond, &comms.mutex)
+    return comms.closed == false
 }
 
 comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL) -> (data: T, received: bool) {
@@ -143,10 +153,7 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL) -> (data: T, recei
             for &channel in comms.channels {
                 if data, ok := comm_try_recv(&channel); ok do return data, true
             }
-            if sync.guard(&comms.mutex) {
-                if comms.closed do return data, false
-                sync.wait(&comms.cond, &comms.mutex)
-            }
+            comms_wait(comms) or_return
         }
     }
     return comm_recv(&comms.channels[channel])
