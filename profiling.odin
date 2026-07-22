@@ -22,7 +22,7 @@ Profiler :: struct {
 }
 
 profiler_init :: proc(profiler: ^Profiler, allocator := context.allocator) {
-    profiler.entries = make(map[string]Profile_Entry, allocator)
+    profiler.entries = make(map[string]Profile_Entry, PROF_MAX_STACK_SIZE, allocator)
     append(&profiler.stack, "root")
     time.stopwatch_start(&profiler.stopwatch)
 }
