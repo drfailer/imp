@@ -329,7 +329,7 @@ range_init :: proc(ctx: Ctx, count: int) -> Range {
 
     step := count / thread_count
     start_idx := thread_index * step
-    return Range{thread_count, start_idx, step, count, thread_index, 0, thread_index}
+    return Range{thread_count, start_idx, step, count, thread_index, 0, start_idx}
 }
 
 range_continue :: proc(range: Range) -> bool {
