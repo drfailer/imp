@@ -314,9 +314,7 @@ sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) {
 // range ///////////////////////////////
 
 Range :: struct {
-    thread_count: int,
-    init, step, max: int,
-    it_out, it_in, it: int,
+    it, max: int,
 }
 
 range_init :: proc(ctx: Ctx, count: int) -> Range {
@@ -324,12 +322,11 @@ range_init :: proc(ctx: Ctx, count: int) -> Range {
     thread_index := get_thread_index(ctx)
 
     if thread_count >= count {
-        return Range{thread_count, thread_index, 1, count, thread_index, 0, thread_index}
+        return Range{thread_index, min(count, thread_index + 1)}
     }
-
-    step := count / thread_count
+    step := count / thread_count + (count % thread_count == 0 ? 0 : 1)
     start_idx := thread_index * step
-    return Range{thread_count, start_idx, step, count, thread_index, 0, start_idx}
+    return Range{start_idx, min(count, start_idx + step)}
 }
 
 range_continue :: proc(range: Range) -> bool {
@@ -337,14 +334,7 @@ range_continue :: proc(range: Range) -> bool {
 }
 
 range_next_mut :: proc(range: ^Range) {
-    range.it_in += 1
-    if range.it_in == range.step {
-        range.it_in = 0
-        range.it_out += range.thread_count
-        range.it = range.it_out * range.step
-    } else {
-        range.it += 1
-    }
+    range.it += 1
 }
 
 range_next_imut :: proc(range: Range) -> Range {
