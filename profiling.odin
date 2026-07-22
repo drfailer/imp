@@ -276,6 +276,6 @@ prof_print_report :: proc(profiler: Profiler) {
 
 // Stubs for when the profiler is disabled
 prof_print_report_dot :: proc(ctx: Global_Ctx, filename: string) {}
-prof_print_report :: proc(ctx: Global_Ctx) {}
+prof_print_report :: proc(profiler: Profiler) {}
 
 }
