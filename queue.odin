@@ -46,7 +46,8 @@ lock_queue_destroy :: proc(queue: ^LockQueue($T)) {
 
 lock_queue_push :: proc(queue: ^LockQueue($T), data: T) -> bool {
     sync.guard(&queue.mutex)
-    q.enqueue(&queue.datas, data)
+    ok, err := q.enqueue(&queue.datas, data)
+    ensure(ok && err == nil, "failed to grow the queue")
     return true
 }
 
