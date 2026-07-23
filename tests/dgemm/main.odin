@@ -49,6 +49,7 @@ Dgemm_Data :: struct {
         product_state: imp.Comms(union { ^Tile_A, ^Tile_B }),
         sum_state: imp.Comms(union { ^Tile_C, Product_Data, Sum_Data }),
         tasks: imp.Comms(union { Product_Data, Sum_Data })
+        // tasks: imp.Assembly_Line(union { Product_Data, Sum_Data }, 1024),
     }
 }
 
@@ -69,11 +70,13 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     data.tile_rows = tile_rows
     imp.pool_init(&data.tile_pools[0], data.TM * data.TK)
     imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
-    imp.pool_init(&data.tile_pools[2], data.TM * data.TM)
-    imp.pool_init(&data.tile_pools[3], 2000, init_p_tile, data)
+    imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
+    imp.pool_init(&data.tile_pools[3], data.TM * data.TN * data.TK, init_p_tile, data)
     imp.comms_init(&data.comms.product_state)
     imp.comms_init(&data.comms.sum_state)
+
     imp.comms_init(&data.comms.tasks)
+    // imp.assembly_line_init(&data.comms.tasks)
 
     data.product_state.a_tiles = make([dynamic]^Matrix_Tile, data.TM * data.TK)
     data.product_state.b_tiles = make([dynamic]^Matrix_Tile, data.TK * data.TN)
@@ -87,6 +90,7 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
     imp.pool_destroy(&data.tile_pools[3])
     imp.comms_destroy(&data.comms.product_state)
     imp.comms_destroy(&data.comms.sum_state)
+
     imp.comms_destroy(&data.comms.tasks)
 
     log.destroy_console_logger(data.logger)
@@ -137,7 +141,8 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         p.cols = b.rows
         p.row_idx = a.row_idx
         p.col_idx = b.col_idx
-        imp.comms_send(&data.comms.tasks, Product_Data{a, b, p}, 1)
+        imp.comms_send(&data.comms.tasks, Product_Data{a, b, p}, 0)
+        // imp.assembly_line_put(&data.comms.tasks, Product_Data{a, b, p})
     }
 
     TM := data.TM
@@ -198,7 +203,8 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[c.row_idx * TN + c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
-                imp.comms_send(&data.comms.tasks, Sum_Data{c = c, p = p})
+                imp.comms_send(&data.comms.tasks, Sum_Data{c = c, p = p}, 0)
+                // imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = c, p = p})
             } else {
                 q.c = c
             }
@@ -212,7 +218,8 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[p.row_idx * TN + p.col_idx]
             if q.c != nil {
-                imp.comms_send(&data.comms.tasks, Sum_Data{c = q.c, p = p})
+                imp.comms_send(&data.comms.tasks, Sum_Data{c = q.c, p = p}, 0)
+                // imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = q.c, p = p})
             } else {
                 queue.enqueue(&q.ps, p)
             }
@@ -232,7 +239,8 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[value.c.row_idx * TN + value.c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
-                imp.comms_send(&data.comms.tasks, Sum_Data{c = value.c, p = p})
+                imp.comms_send(&data.comms.tasks, Sum_Data{c = value.c, p = p}, 0)
+                // imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = value.c, p = p})
             } else {
                 q.c = value.c
             }
@@ -247,6 +255,7 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     for {
         prof.region("tasks_dequeue_compute")
         udata := imp.comms_recv(&data.comms.tasks, thread_index = thread_index) or_break
+        // udata := imp.assembly_line_get(&data.comms.tasks) or_break
 
         switch tiles in udata {
         case Product_Data:
@@ -274,6 +283,7 @@ terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     fmt.println("terminate")
     imp.comms_set_closed(&data.comms.sum_state)
     imp.comms_set_closed(&data.comms.tasks)
+    // imp.assembly_line_set_stop(&data.comms.tasks)
 }
 
 dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {

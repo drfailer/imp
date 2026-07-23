@@ -288,3 +288,64 @@ comms_try_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index :
 
     return {}, false
 }
+
+// assembly line ///////////////////////////////////////////////////////////////
+
+Assembly_Line_Slot :: struct($T: typeid) {
+    value: T,
+    index: int,
+}
+
+Assembly_Line :: struct($T: typeid, $S: int) #align(64) {
+    data: [S]Assembly_Line_Slot(T),
+    _pad0: [64]u8,
+    head: int,
+    _pad1: [64]u8,
+    tail: int,
+    _pad2: [64]u8,
+    stop: bool,
+}
+
+assembly_line_init :: proc(line: ^Assembly_Line($T, $S)) {
+    #assert(((S - 1) & S) == 0)
+    for &d in line.data {
+        d.index = -1
+    }
+}
+
+assembly_line_set_stop :: proc(line: ^Assembly_Line($T, $S), stop := true) {
+    sync.atomic_store_explicit(&line.stop, stop, .Release)
+}
+
+assembly_line_put :: proc(line: ^Assembly_Line($T, $S), data: T) {
+    head := sync.atomic_add_explicit(&line.head, 1, .Relaxed)
+    slot := &line.data[head & (S - 1)]
+
+    // wait for the slot to be free
+    for sync.atomic_load_explicit(&slot.index, .Acquire) != -1 {
+        intrinsics.cpu_relax()
+    }
+    slot.value = data
+    sync.atomic_store_explicit(&slot.index, head, .Release)
+}
+
+assembly_line_get :: proc(line: ^Assembly_Line($T, $S)) -> (T, bool) {
+    tail := sync.atomic_add_explicit(&line.tail, 1, .Relaxed)
+    slot := &line.data[tail & (S - 1)]
+
+    // wait for the slot to be ready
+    for sync.atomic_load_explicit(&slot.index, .Acquire) != tail {
+        if sync.atomic_load_explicit(&line.stop, .Acquire) {
+            // Check if our ticket was never claimed by a writer.
+            // If tail >= head, no writer is coming for this slot.
+            curr_head := sync.atomic_load_explicit(&line.head, .Acquire)
+            if tail >= curr_head {
+                return T{}, false
+            }
+        }
+        intrinsics.cpu_relax()
+    }
+    value := slot.value
+    sync.atomic_store_explicit(&slot.index, -1, .Release)
+    return value, true
+}
