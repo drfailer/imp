@@ -2,11 +2,12 @@ package common
 
 import "cblas"
 import "core:fmt"
+import "core:mem"
 
 Matrix :: struct {
     id: int,
-    rows, cols, ld: uint,
-    data: []f64,
+    rows, cols, ld, size: uint,
+    data: [^]f64,
 }
 
 matrix_init :: proc(m: ^Matrix, id: int, rows, cols: uint, allocator := context.allocator) {
@@ -14,11 +15,12 @@ matrix_init :: proc(m: ^Matrix, id: int, rows, cols: uint, allocator := context.
     m.rows = rows
     m.cols = cols
     m.ld = cols
-    m.data = make([]f64, rows * cols, allocator)
+    m.size = rows * cols
+    m.data = make([^]f64, rows * cols, allocator)
 }
 
 matrix_destroy :: proc(m: ^Matrix) {
-    delete(m.data)
+    free(m.data)
 }
 
 dot :: proc(A, B, C: Matrix) {
@@ -36,7 +38,7 @@ Matrix_Build_Kind :: enum { Zero, Int, Float }
 
 matrix_build :: proc(m: ^Matrix, kind: Matrix_Build_Kind) {
     switch kind {
-    case .Zero: for &data in m.data do data = 0
+    case .Zero: mem.zero(m.data, int(m.size * size_of(f64)))
     case .Int:
         v := f64(1)
         for i in 0..<m.rows {
@@ -89,6 +91,7 @@ matrix_tile_init_from_matrix :: proc(tile: ^Matrix_Tile, m: Matrix, row, col, ro
     tile.rows = rows
     tile.cols = cols
     tile.ld = m.ld
+    tile.size = rows * cols
     tile.data = m.data[row * m.ld + col:]
 }
 
@@ -98,7 +101,8 @@ matrix_tile_init_alloc :: proc(tile: ^Matrix_Tile, row_idx, col_idx, rows, cols:
     tile.rows = rows
     tile.cols = cols
     tile.ld = cols
-    tile.data = make([]f64, rows * cols, allocator)
+    tile.size = rows * cols
+    tile.data = make([^]f64, rows * cols, allocator)
 }
 
 matrix_tile_init :: proc{
@@ -107,5 +111,5 @@ matrix_tile_init :: proc{
 }
 
 matrix_tile_destroy :: proc(tile: ^Matrix_Tile) {
-    delete(tile.data)
+    free(tile.data)
 }

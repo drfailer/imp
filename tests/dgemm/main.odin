@@ -8,7 +8,6 @@ import "core:mem"
 import "core:log"
 import "core:container/queue"
 import "core:fmt"
-import "core:time"
 import "core:testing"
 
 Matrix :: common.Matrix
@@ -17,8 +16,6 @@ Matrix_Tile :: common.Matrix_Tile
 Tile_A :: distinct Matrix_Tile
 Tile_B :: distinct Matrix_Tile
 Tile_C :: distinct Matrix_Tile
-Tile_P :: distinct Matrix_Tile
-
 Product_Data :: struct {
     a, b, p: ^Matrix_Tile,
 }
@@ -71,7 +68,13 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     imp.pool_init(&data.tile_pools[0], data.TM * data.TK)
     imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
     imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
-    imp.pool_init(&data.tile_pools[3], data.TM * data.TN * data.TK, init_p_tile, data)
+
+    p_capacity := data.TM * data.TN // * data.TK
+    p_elem_size := uint(size_of(Matrix_Tile) + size_of(rawptr))
+    p_tile_data_size := tile_rows * tile_cols * size_of(f64)
+    imp.pool_init(&data.tile_pools[3], p_capacity, init_p_tile, data,
+                  reserved = p_capacity * (p_elem_size + p_tile_data_size))
+
     imp.comms_init(&data.comms.product_state)
     imp.comms_init(&data.comms.sum_state)
 
@@ -147,14 +150,13 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     TM := data.TM
     TN := data.TN
     TK := data.TK
-    thread_index := imp.get_thread_index(ctx)
 
     for {
         prof.region("product_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.product_state) or_break
 
         prof.region("product_state_compute")
-        switch value in udata {
+        #no_bounds_check switch value in udata {
         case ^Tile_A:
             a := cast(^Matrix_Tile)value
             log.debugf("product_state: A[{},{}]", a.row_idx, a.col_idx)
@@ -247,7 +249,6 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
 tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     prof.procedure()
-    thread_index := imp.get_thread_index(ctx)
 
     for {
         prof.region("tasks_dequeue_compute")
@@ -263,13 +264,17 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             c := tiles.c
             p := tiles.p
 
-            #no_bounds_check {
-                for row in 0..<tiles.c.rows {
-                    croffset := row * c.ld
-                    proffset := row * p.ld
-                    for col in 0..<tiles.c.cols {
-                        c.data[croffset + col] += p.data[proffset + col]
-                    }
+            c_ptr := c.data
+            p_ptr := p.data
+            c_ld := c.ld
+            p_ld := p.ld
+            rows := tiles.c.rows
+            cols := tiles.c.cols
+            #no_bounds_check for row in 0..<rows {
+                cr := c_ptr[row * c_ld:]
+                pr := p_ptr[row * p_ld:]
+                for col in 0..<cols {
+                    cr[col] += pr[col]
                 }
             }
             imp.comms_send(&data.comms.sum_state, tiles, 2)
@@ -320,7 +325,7 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) -> bool {
     data := Data{ R, E, precision, true }
 
     comp :: proc(ctx: imp.Ctx, data: ^Data) {
-        assert(data.E.rows == data.R.rows || data.E.cols == data.R.cols)
+        assert(data.E.rows == data.R.rows && data.E.cols == data.R.cols)
 
         results: [dynamic]bool
         if imp.single(ctx, 0) {
@@ -329,7 +334,7 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) -> bool {
         }
         imp.sync_val(ctx, 0, &results)
 
-        for r := imp.range_init(ctx, len(data.E.data)); imp.range_continue(r); r = imp.range_next(r) {
+        for r := imp.range_init(ctx, int(data.E.size)); imp.range_continue(r); r = imp.range_next(r) {
             e := data.E.data[r.it]
             el := e - data.precision
             er := e + data.precision
