@@ -43,33 +43,33 @@ queue_size :: proc{
 
 // lock queue //////////////////////////////////////////////////////////////////
 
-LockQueue :: struct($T: typeid) {
+Lock_Queue :: struct($T: typeid) {
     datas: q.Queue(T),
     mutex: sync.Mutex,
 }
 
-lock_queue_init :: proc(queue: ^LockQueue($T), allocator := context.allocator) {
+lock_queue_init :: proc(queue: ^Lock_Queue($T), allocator := context.allocator) {
     q.init(&queue.datas, allocator = allocator)
 }
 
-lock_queue_destroy :: proc(queue: ^LockQueue($T)) {
+lock_queue_destroy :: proc(queue: ^Lock_Queue($T)) {
     q.destroy(&queue.datas)
 }
 
-lock_queue_push :: proc(queue: ^LockQueue($T), data: T) -> bool {
+lock_queue_push :: proc(queue: ^Lock_Queue($T), data: T) -> bool {
     sync.guard(&queue.mutex)
     ok, err := q.enqueue(&queue.datas, data)
     ensure(ok && err == nil, "failed to grow the queue")
     return true
 }
 
-lock_queue_pop :: proc(queue: ^LockQueue($T)) -> (result: T, popped: bool){
+lock_queue_pop :: proc(queue: ^Lock_Queue($T)) -> (result: T, popped: bool){
     sync.guard(&queue.mutex)
     if q.len(queue.datas) == 0 do return result, false
     return q.dequeue(&queue.datas), true
 }
 
-lock_queue_size :: proc(queue: ^LockQueue($T)) -> int {
+lock_queue_size :: proc(queue: ^Lock_Queue($T)) -> int {
     sync.guard(&queue.mutex)
     return q.len(queue.datas)
 }
