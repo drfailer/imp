@@ -24,20 +24,10 @@ Comm :: struct($T: typeid) {
 
 comm_init :: proc(comm: ^Comm($T), allocator := context.allocator) {
     queue_init(&comm.queue, allocator)
-    // closed and waiters default to false/0 automatically
 }
 
 comm_destroy :: proc(comm: ^Comm($T)) {
     queue_destroy(&comm.queue)
-}
-
-comm_open :: proc(comm: ^Comm($T)) {
-    intrinsics.atomic_store(&comm.closed, false)
-    if intrinsics.atomic_load(&comm.waiters) > 0 {
-        sync.lock(&comm.mutex)
-        sync.broadcast(&comm.cond)
-        sync.unlock(&comm.mutex)
-    }
 }
 
 comm_set_closed :: proc(comm: ^Comm($T), closed := true) {
@@ -69,8 +59,6 @@ comm_wait_open :: proc(comm: ^Comm($T)) {
 
 comm_send :: proc(comm: ^Comm($T), m: T) {
     queue_push(&comm.queue, m)
-
-    // Fast-path: If no one is waiting, we are completely lock-free!
     if intrinsics.atomic_load(&comm.waiters) > 0 {
         sync.lock(&comm.mutex)
         sync.signal(&comm.cond)
@@ -95,19 +83,18 @@ comm_wait :: proc(comm: ^Comm($T)) -> bool {
 }
 
 comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
-    // Fast-path lock-free pop
     if m, ok = queue_pop(&comm.queue); ok {
         return m, true
     }
 
+    // slow-path: wait[or message
     for {
         if intrinsics.atomic_load(&comm.closed) do return {}, false
 
-        // Prepare for the slow-path wait
         intrinsics.atomic_add(&comm.waiters, 1)
         sync.lock(&comm.mutex)
 
-        // Double-check inside the lock to avoid the lost-wakeup race condition
+        // double-check
         if m, ok = queue_pop(&comm.queue); ok {
             sync.unlock(&comm.mutex)
             intrinsics.atomic_sub(&comm.waiters, 1)
@@ -121,7 +108,6 @@ comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
         sync.unlock(&comm.mutex)
         intrinsics.atomic_sub(&comm.waiters, 1)
 
-        // Check queue again right after waking up
         if m, ok = queue_pop(&comm.queue); ok {
             return m, true
         }
@@ -152,7 +138,6 @@ comms_init_channels :: proc(comms: ^Comms($T), channel_count: int, allocator := 
     }
 }
 
-// NOTE: Ensure `runtime.Type_Info_Union` is correctly scoped to your imports
 comms_init_union :: proc(comms: ^Comms($T), allocator := context.allocator) where intrinsics.type_is_union(T) {
     type_info := type_info_of(T)
     comms_init(comms, len(type_info.variant.(runtime.Type_Info_Union).variants), allocator)
@@ -168,7 +153,6 @@ comms_destroy :: proc(comms: ^Comms($T)) {
 }
 
 comms_set_closed :: proc(comms: ^Comms($T), closed := true) {
-    // Close underlying channels first
     for &channel in comms.channels {
         comm_set_closed(&channel, closed)
     }
@@ -201,10 +185,9 @@ comms_wait_open :: proc(comms: ^Comms($T)) {
 }
 
 comms_send :: proc(comms: ^Comms($T), data: T, channel := 0) {
-    // Send directly through the specific channel (handles its own waiting logic)
     comm_send(&comms.channels[channel], data)
 
-    // Also wake up any global ANY_CHANNEL waiters
+    // wake up any global ANY_CHANNEL waiters
     if intrinsics.atomic_load(&comms.waiters) > 0 {
         sync.lock(&comms.mutex)
         sync.signal(&comms.cond)
@@ -236,11 +219,9 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0)
     channel_count := len(comms.channels)
     if channel_count == 0 do return {}, false
 
-    // We use a simple multiplicative hash on the thread_id to ensure
-    // thread IDs are distributed evenly, even if the OS assigns them sequentially.
+    // thread can give their index to manage how channels are scanned
     start_idx := thread_index % channel_count
 
-    // 1. Fast-path staggered lock-free check
     for i in 0..<channel_count {
         idx := (start_idx + i) % channel_count
         if data, ok := comm_try_recv(&comms.channels[idx]); ok {
@@ -248,14 +229,14 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0)
         }
     }
 
-    // 2. Slow-path: Prepare to sleep
+    // slow-path: prepare to sleep
     for {
         if intrinsics.atomic_load(&comms.closed) do return {}, false
 
         intrinsics.atomic_add(&comms.waiters, 1)
         sync.lock(&comms.mutex)
 
-        // Double-check channels inside lock, also staggered!
+        // double-check
         found := false
         for i in 0..<channel_count {
             idx := (start_idx + i) % channel_count
@@ -279,7 +260,6 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0)
         sync.unlock(&comms.mutex)
         intrinsics.atomic_sub(&comms.waiters, 1)
 
-        // 3. Staggered check right after waking up
         for i in 0..<channel_count {
             idx := (start_idx + i) % channel_count
             if data, ok := comm_try_recv(&comms.channels[idx]); ok {
