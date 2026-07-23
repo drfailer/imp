@@ -4,13 +4,25 @@ import "core:sync"
 import "base:intrinsics"
 import "core:mem"
 import "core:fmt"
+SPIN_BACKOFF_INIT :: 1
+SPIN_BACKOFF_MAX :: 64
+
+@(private)
+spin_backoff :: proc(count: ^int) {
+    for _ in 0..<count^ {
+        intrinsics.cpu_relax()
+    }
+    count^ = min(count^ * 2, SPIN_BACKOFF_MAX)
+}
 
 // Barriers ////////////////////////////////////////////////////////////////////
 
 SpinBarrier :: struct #align(64) {
-    counter: int,
-    generation: int,
     thread_count: int,
+    _pad0: [64 - size_of(int)]u8,
+    counter: int,
+    _pad1: [64 - size_of(int)]u8,
+    generation: int,
 }
 
 spin_barrier_init :: proc(barrier: ^SpinBarrier, thread_count: int) {
@@ -26,8 +38,9 @@ spin_barrier_wait :: proc(barrier: ^SpinBarrier) {
         sync.atomic_add_explicit(&barrier.generation, 1, .Release)
         return
     }
+    backoff := SPIN_BACKOFF_INIT
     for sync.atomic_load_explicit(&barrier.generation, .Acquire) == gen {
-        intrinsics.cpu_relax()
+        spin_backoff(&backoff)
     }
 }
 

@@ -43,9 +43,10 @@ queue_size :: proc{
 
 // lock queue //////////////////////////////////////////////////////////////////
 
-Lock_Queue :: struct($T: typeid) {
-    datas: q.Queue(T),
+Lock_Queue :: struct($T: typeid) #align(CACHE_LINE) {
     mutex: sync.Mutex,
+    _pad: [CACHE_LINE - size_of(sync.Mutex)]u8,
+    datas: q.Queue(T),
 }
 
 lock_queue_init :: proc(queue: ^Lock_Queue($T), allocator := context.allocator) {

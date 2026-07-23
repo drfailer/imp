@@ -45,15 +45,15 @@ comm_closed :: proc(comm: ^Comm($T)) -> bool {
 
 comm_wait_open :: proc(comm: ^Comm($T)) {
     for intrinsics.atomic_load(&comm.closed) {
-        intrinsics.atomic_add(&comm.waiters, 1)
         sync.lock(&comm.mutex)
+        intrinsics.atomic_add(&comm.waiters, 1)
 
         if intrinsics.atomic_load(&comm.closed) {
             sync.wait(&comm.cond, &comm.mutex)
         }
 
-        sync.unlock(&comm.mutex)
         intrinsics.atomic_sub(&comm.waiters, 1)
+        sync.unlock(&comm.mutex)
     }
 }
 
@@ -87,14 +87,14 @@ comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
         return m, true
     }
 
-    // slow-path: wait[or message
+    // slow-path: wait for message
     for {
         if intrinsics.atomic_load(&comm.closed) do return {}, false
 
         intrinsics.atomic_add(&comm.waiters, 1)
         sync.lock(&comm.mutex)
 
-        // double-check
+        // double-check under lock
         if m, ok = queue_pop(&comm.queue); ok {
             sync.unlock(&comm.mutex)
             intrinsics.atomic_sub(&comm.waiters, 1)
@@ -107,10 +107,6 @@ comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
 
         sync.unlock(&comm.mutex)
         intrinsics.atomic_sub(&comm.waiters, 1)
-
-        if m, ok = queue_pop(&comm.queue); ok {
-            return m, true
-        }
     }
 }
 
@@ -172,15 +168,15 @@ comms_is_closed :: proc(comms: ^Comms($T)) -> bool {
 
 comms_wait_open :: proc(comms: ^Comms($T)) {
     for intrinsics.atomic_load(&comms.closed) {
-        intrinsics.atomic_add(&comms.waiters, 1)
         sync.lock(&comms.mutex)
+        intrinsics.atomic_add(&comms.waiters, 1)
 
         if intrinsics.atomic_load(&comms.closed) {
             sync.wait(&comms.cond, &comms.mutex)
         }
 
-        sync.unlock(&comms.mutex)
         intrinsics.atomic_sub(&comms.waiters, 1)
+        sync.unlock(&comms.mutex)
     }
 }
 
@@ -297,13 +293,13 @@ Assembly_Line_Slot :: struct($T: typeid) {
 }
 
 Assembly_Line :: struct($T: typeid, $S: int) #align(64) {
-    data: [S]Assembly_Line_Slot(T),
-    _pad0: [64]u8,
     head: int,
-    _pad1: [64]u8,
+    _pad1: [64 - size_of(int)]u8,
     tail: int,
-    _pad2: [64]u8,
+    _pad2: [64 - size_of(int)]u8,
     stop: bool,
+    _pad3: [64 - size_of(bool)]u8,
+    data: [S]Assembly_Line_Slot(T),
 }
 
 assembly_line_init :: proc(line: ^Assembly_Line($T, $S)) {
@@ -322,8 +318,9 @@ assembly_line_put :: proc(line: ^Assembly_Line($T, $S), data: T) {
     slot := &line.data[head & (S - 1)]
 
     // wait for the slot to be free
+    backoff := SPIN_BACKOFF_INIT
     for sync.atomic_load_explicit(&slot.index, .Acquire) != -1 {
-        intrinsics.cpu_relax()
+        spin_backoff(&backoff)
     }
     slot.value = data
     sync.atomic_store_explicit(&slot.index, head, .Release)
@@ -334,6 +331,7 @@ assembly_line_get :: proc(line: ^Assembly_Line($T, $S)) -> (T, bool) {
     slot := &line.data[tail & (S - 1)]
 
     // wait for the slot to be ready
+    backoff := SPIN_BACKOFF_INIT
     for sync.atomic_load_explicit(&slot.index, .Acquire) != tail {
         if sync.atomic_load_explicit(&line.stop, .Acquire) {
             // Check if our ticket was never claimed by a writer.
@@ -343,7 +341,7 @@ assembly_line_get :: proc(line: ^Assembly_Line($T, $S)) -> (T, bool) {
                 return T{}, false
             }
         }
-        intrinsics.cpu_relax()
+        spin_backoff(&backoff)
     }
     value := slot.value
     sync.atomic_store_explicit(&slot.index, -1, .Release)

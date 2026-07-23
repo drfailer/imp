@@ -142,12 +142,13 @@ Shared_Ctx :: struct {
     thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
     branch: struct #align(64) {
         generation: int,      // Solves the fast-laps-slow hazard
+        _pad_gen: [64 - size_of(int)]u8,
         ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
-        _pad0: [64]u8,
+        _pad0: [64 - size_of([2]^Shared_Ctx)]u8,
         init_counter: int,    // Slot claiming
-        _pad1: [64]u8,
+        _pad1: [64 - size_of(int)]u8,
         fini_counter: int,    // Exit reference count
-        _pad2: [64]u8,
+        _pad2: [64 - size_of(int)]u8,
         arrival_counter: int, // ASAP reset counter
     },
     sync: union { // use for synchronizing values
@@ -193,8 +194,10 @@ Data :: struct {
     ptr: rawptr,
 }
 
-data_ptr :: proc(data: Data, $T: typeid) -> ^T {
-    if data.type != T do panic("tried to unpack data from the wrong type")
+data_ptr :: #force_inline proc(data: Data, $T: typeid) -> ^T {
+    when ODIN_DEBUG {
+        if data.type != T do panic("tried to unpack data from the wrong type")
+    }
     return cast(^T)data.ptr
 }
 
@@ -222,8 +225,10 @@ get_thread_count :: proc(ctx: Ctx) -> int {
     return get_shared_ctx(ctx).thread_count
 }
 
-get_local_ctx :: proc(ctx: Ctx) -> ^Local_Ctx {
-    return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
+get_local_ctx :: #force_inline proc(ctx: Ctx) -> ^Local_Ctx {
+    #no_bounds_check {
+        return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
+    }
 }
 
 get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
@@ -260,16 +265,13 @@ sync_vals_slice :: proc(ctx: Ctx, master_index: int, vals: []$T) {
     if get_thread_index(ctx) != master_index {
         master_vals := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
         assert(len(vals) == len(master_vals))
-        for i in 0..<len(vals) {
-            vals[i] = master_vals[i]
-        }
+        mem.copy(raw_data(vals), raw_data(master_vals), len(vals) * size_of(T))
     }
     barrier(ctx, .Spin)
 }
 
 sync_vals_variadic :: proc(ctx: Ctx, master_index: int, $T: typeid, vals: ..^T) {
-    vals_array := make([dynamic]T, len(vals), context.temp_allocator)
-    defer delete(vals_array)
+    vals_array := make([]T, len(vals), context.temp_allocator)
 
     if get_thread_index(ctx) == master_index {
         for val, idx in vals {
@@ -519,12 +521,12 @@ get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, i
     // threads going into a branch do not wait for the other threads so we need
     // to wait for the thread_data to be available if the initialization is not
     // done yet (most of the time, thread won't wait).
+    backoff := SPIN_BACKOFF_INIT
     for {
         thread_data := sync.atomic_load_explicit(&ctx.thread_index_map[index], .Acquire)
         if thread_data != nil do return thread_data
-        intrinsics.cpu_relax()
+        spin_backoff(&backoff)
     }
-    panic("unreachable")
 }
 
 send_data_parallel_ctx_data :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {

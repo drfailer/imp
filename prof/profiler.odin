@@ -62,7 +62,7 @@ fini :: proc() {
 }
 
 clear :: proc() {
-    for &profiler in PROFILERS[:MAX_THREAD_COUNT] {
+    for &profiler in PROFILERS[:sync.atomic_load(&THREAD_COUNTER)] {
         for _, &entry in profiler.entries {
             delete(entry.parents)
         }
@@ -109,19 +109,11 @@ region_begin :: proc(name: string) {
     profiler := get_profiler()
 
     // get or insert the entry
-    entry, found := &profiler.entries[name]
-    if !found {
-        profiler.entries[name] = Profile_Entry{}
-        entry = &profiler.entries[name]
-    }
+    entry := map_get_ptr(&profiler.entries, name)
 
     // update the parent info
     parent_name := profiler.stack[len(profiler.stack) - 1]
-    parent_info, parent_found := &entry.parents[parent_name]
-    if !parent_found {
-        entry.parents[parent_name] = Parent_Profile_Info{}
-        parent_info = &entry.parents[parent_name]
-    }
+    parent_info := map_get_ptr(&entry.parents, parent_name)
     parent_info.call_count += 1
 
     // update the call stack if possible
@@ -335,7 +327,7 @@ gather_profile_infos :: proc(allocator := context.allocator) -> (infos: Gathered
     infos.global_time = time.stopwatch_duration(GLOBAL_STOPWATCH)
 
     // compute the global entries (merge informations from all the threads)
-    for &profiler in PROFILERS {
+    for &profiler in PROFILERS[:sync.atomic_load(&THREAD_COUNTER)] {
         for entry_name, entry in profiler.entries {
             global_entry := map_get_ptr(&infos.entries, entry_name)
 

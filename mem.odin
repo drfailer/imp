@@ -94,7 +94,9 @@ pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, 
 
 pool_release :: proc(pool: ^Pool($T), elem: ^T) {
     node := cast(^Pool_Node(T))elem
-    if node._next != node do panic("tried to release an invalid or corrupted element")
+    when ODIN_DEBUG {
+        if node._next != node do panic("tried to release an invalid or corrupted element")
+    }
     if sync.guard(&pool.mutex) {
         node._next = pool.free_list
         pool.free_list = node
