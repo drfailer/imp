@@ -9,6 +9,7 @@ import "core:log"
 import "core:container/queue"
 import "core:fmt"
 import "core:time"
+import "core:testing"
 
 Matrix :: common.Matrix
 Matrix_Tile :: common.Matrix_Tile
@@ -91,6 +92,9 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
 
     log.destroy_console_logger(data.logger)
 
+    for &q in data.sum_state.queues {
+        queue.destroy(&q.ps)
+    }
     delete(data.sum_state.queues)
     delete(data.product_state.a_tiles)
     delete(data.product_state.b_tiles)
@@ -311,7 +315,7 @@ dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
     imp.launch(&global_ctx, dgemm_parallel, &data)
 }
 
-commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
+commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) -> bool {
     Data :: struct { R, E: Matrix, precision: f64, result: bool }
     data := Data{ R, E, precision, true }
 
@@ -353,12 +357,30 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
     imp.global_ctx_init(&global_ctx, 10)
     defer imp.global_ctx_destroy(&global_ctx)
     imp.launch(&global_ctx, comp, &data)
+    return data.result
+}
 
-    if data.result == true {
-        fmt.println("[SUCCESS]: matricies equal")
-    } else {
-        fmt.println("[FAIL]: matricies not equal")
-    }
+@(test)
+test :: proc(t: ^testing.T) {
+    MATRIX_SIZE :: 512
+    TILE_SIZE :: 32
+    A, B, C, E: Matrix
+    common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
+    defer common.matrix_destroy(&A)
+    common.matrix_init(&B, 1, MATRIX_SIZE, MATRIX_SIZE)
+    defer common.matrix_destroy(&B)
+    common.matrix_init(&C, 2, MATRIX_SIZE, MATRIX_SIZE)
+    defer common.matrix_destroy(&C)
+    common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
+    defer common.matrix_destroy(&E)
+
+    common.matrix_build(&A, .Int)
+    common.matrix_build(&B, .Int)
+
+    common.dot(A, B, E)
+    cblas.openblas_set_num_threads(1)
+    dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
+    testing.expect(t, commpare_matrices(C, E))
 }
 
 main :: proc() {
@@ -368,8 +390,8 @@ main :: proc() {
         prof.fini()
     }
 
-    MATRIX_SIZE :: 20000
-    TILE_SIZE :: 2048
+    MATRIX_SIZE :: 10000
+    TILE_SIZE :: 1024
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
@@ -398,7 +420,11 @@ main :: proc() {
         dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
     }
 
-    commpare_matrices(C, E)
+    if commpare_matrices(C, E) == true {
+        fmt.println("[SUCCESS]: matricies equal")
+    } else {
+        fmt.println("[FAIL]: matricies not equal")
+    }
 
     prof.report({"cblas", "dgemm"})
 
