@@ -140,18 +140,21 @@ Shared_Ctx :: struct {
     cond: sync.Cond,
     mutex: sync.Mutex,
     thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
-    barrier: Barrier,
-    branch: struct {
-        init_counter: int,    // Slot claiming
-        fini_counter: int,    // Exit reference count
-        arrival_counter: int, // ASAP reset counter
+    branch: struct #align(64) {
         generation: int,      // Solves the fast-laps-slow hazard
         ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
+        _pad0: [64]u8,
+        init_counter: int,    // Slot claiming
+        _pad1: [64]u8,
+        fini_counter: int,    // Exit reference count
+        _pad2: [64]u8,
+        arrival_counter: int, // ASAP reset counter
     },
     sync: union { // use for synchronizing values
         rawptr,
         runtime.Raw_Slice,
     },
+    barrier: Barrier,
 }
 
 shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count, comm_channel_count: int) {
