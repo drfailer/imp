@@ -1,6 +1,7 @@
 package dgemm
 
 import "../../"
+import "../../prof"
 import "../common"
 import "../common/cblas"
 import "core:mem"
@@ -96,7 +97,7 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
 }
 
 split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
-    imp.prof_procedure(ctx)
+    prof.procedure()
     thread_index := imp.get_thread_index(ctx)
 
     m: Matrix
@@ -127,7 +128,7 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
-    imp.prof_procedure(ctx)
+    prof.procedure()
 
     product := proc(ctx: imp.Ctx, data: ^Dgemm_Data, a, b: ^Matrix_Tile) {
         p, ok := imp.pool_alloc(&data.tile_pools[3], .Wait)
@@ -142,12 +143,13 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     TM := data.TM
     TN := data.TN
     TK := data.TK
+    thread_index := imp.get_thread_index(ctx)
 
     for {
-        imp.prof_region(ctx, "product_state_dequeue_compute")
+        prof.region("product_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.product_state) or_break
 
-        imp.prof_region(ctx, "product_state_compute")
+        prof.region("product_state_compute")
         switch value in udata {
         case ^Tile_A:
             a := cast(^Matrix_Tile)value
@@ -172,7 +174,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
-    imp.prof_procedure(ctx)
+    prof.procedure()
 
     TM := data.TM
     TN := data.TN
@@ -184,10 +186,10 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.barrier(ctx)
 
     for {
-        imp.prof_region(ctx, "sum_state_dequeue_compute")
+        prof.region("sum_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.sum_state) or_break
 
-        imp.prof_region(ctx, "sum_state_compute")
+        prof.region("sum_state_compute")
         switch value in udata {
         case ^Tile_C:
             c := cast(^Matrix_Tile)value
@@ -239,20 +241,20 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
-    imp.prof_procedure(ctx)
+    prof.procedure()
     thread_index := imp.get_thread_index(ctx)
 
     for {
-        imp.prof_region(ctx, "tasks_dequeue_compute")
+        prof.region("tasks_dequeue_compute")
         udata := imp.comms_recv(&data.comms.tasks, thread_index = thread_index) or_break
 
         switch tiles in udata {
         case Product_Data:
-            imp.prof_region(ctx, "product_task")
+            prof.region("product_task")
             common.dot(tiles.a, tiles.b, tiles.p)
             imp.comms_send(&data.comms.sum_state, tiles, 1)
         case Sum_Data:
-            imp.prof_region(ctx, "sum_task")
+            prof.region("sum_task")
             c := tiles.c
             p := tiles.p
             for row in 0..<tiles.c.rows {
@@ -275,7 +277,7 @@ terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
-    imp.prof_procedure(ctx)
+    prof.procedure()
     context.logger = data.logger
 
     run_sum_task := true
@@ -303,8 +305,6 @@ dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
     imp.global_ctx_init(&global_ctx, 40)
     defer imp.global_ctx_destroy(&global_ctx)
     imp.launch(&global_ctx, dgemm_parallel, &data)
-
-    imp.prof_print_report_dot(global_ctx, "dgemm.dot")
 }
 
 commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
@@ -358,8 +358,14 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
 }
 
 main :: proc() {
+    prof.init()
+    defer {
+        prof.print_report_to_file("dgemm.dot", .Dot)
+        prof.fini()
+    }
+
     MATRIX_SIZE :: 20000
-    TILE_SIZE :: 1024
+    TILE_SIZE :: 2048
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
@@ -376,25 +382,19 @@ main :: proc() {
 
     fmt.printfln("MATRIX_SIZE = {}, TILE_SIZE = {}", MATRIX_SIZE, TILE_SIZE)
 
-    // {
-    //     sw: time.Stopwatch
-    //     time.stopwatch_start(&sw)
+    // if prof.region("cblas") {
     //     common.dot(A, B, E)
-    //     time.stopwatch_stop(&sw)
-    //     fmt.printfln("bcblas: {}", time.stopwatch_duration(sw))
     // }
 
     cblas.openblas_set_num_threads(1)
 
-    {
-        sw: time.Stopwatch
-        time.stopwatch_start(&sw)
+    if prof.region("dgemm") {
         dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
-        time.stopwatch_stop(&sw)
-        fmt.printfln("dgemm: {}", time.stopwatch_duration(sw))
     }
 
     // commpare_matrices(C, E)
+
+    prof.report({"dgemm"})
 
     if  MATRIX_SIZE < 16 {
         common.matrix_print(A, "A")

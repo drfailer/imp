@@ -25,7 +25,6 @@ Global_Ctx :: struct {
         free_list: ^Shared_Ctx,
     },
     comm_channel_count: int,
-    profilers: Profilers,
 }
 
 DEFAULT_CONTEXT_CAPACITY :: #config(IMP_DEFAULT_CONTEXT_CAPACITY, 64)
@@ -57,16 +56,6 @@ global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int,
     for &tctx, idx in ctx.thread_ctxs {
         thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, comm_channel_count,
                         thread_scratch_memory_size, ctx.shared.root, allocator)
-    }
-
-    when PROFILER_ENABLED {
-        // TODO: the profiler should use the thread allocator
-        ctx.profilers.profilers = make([]Profiler, thread_count, allocator)
-        time.stopwatch_start(&ctx.profilers.stopwatch)
-        for &tctx, idx in ctx.thread_ctxs {
-            profiler_init(&ctx.profilers.profilers[idx])
-            tctx.profiler = &ctx.profilers.profilers[idx]
-        }
     }
 }
 
@@ -120,7 +109,6 @@ Thread_Ctx :: struct {
     id: int,
     comms: Comms(Message(Data)),
     ctx_stack: [dynamic]Local_Ctx,
-    profiler: ^Profiler,
     scratch_memory: mem.Scratch,
 }
 
