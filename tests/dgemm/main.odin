@@ -114,8 +114,8 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                                     min(data.tile_rows, m.rows - row),
                                     min(data.tile_cols, m.cols - col))
             switch thread_index {
-            case 0: imp.comms_send(&data.comms.product_state, cast(^Tile_A)tile)
-            case 1: imp.comms_send(&data.comms.product_state, cast(^Tile_B)tile)
+            case 0: imp.comms_send(&data.comms.product_state, cast(^Tile_A)tile, 0)
+            case 1: imp.comms_send(&data.comms.product_state, cast(^Tile_B)tile, 1)
             case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile, 0)
             }
         }
@@ -240,16 +240,17 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
 tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.prof_procedure(ctx)
+    thread_index := imp.get_thread_index(ctx)
 
     for {
         imp.prof_region(ctx, "tasks_dequeue_compute")
-        udata := imp.comms_recv(&data.comms.tasks) or_break
+        udata := imp.comms_recv(&data.comms.tasks, thread_index = thread_index) or_break
 
         switch tiles in udata {
         case Product_Data:
             imp.prof_region(ctx, "product_task")
             common.dot(tiles.a, tiles.b, tiles.p)
-            imp.comms_send(&data.comms.sum_state, tiles)
+            imp.comms_send(&data.comms.sum_state, tiles, 1)
         case Sum_Data:
             imp.prof_region(ctx, "sum_task")
             c := tiles.c
@@ -259,7 +260,7 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                     c.data[row * c.ld + col] += p.data[row * p.ld + col]
                 }
             }
-            imp.comms_send(&data.comms.sum_state, tiles)
+            imp.comms_send(&data.comms.sum_state, tiles, 2)
         }
     }
 }
@@ -358,7 +359,7 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) {
 
 main :: proc() {
     MATRIX_SIZE :: 20000
-    TILE_SIZE :: 2048
+    TILE_SIZE :: 1024
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
