@@ -299,7 +299,7 @@ generate_dot_file :: proc(file: ^os.File) {
 } else {
 
 report :: proc(target_entries: []string = {}) {}
-print_report_to_file :: proc(filename: string, format := ReportFormat.Text) {}
+print_report_to_file :: proc(filename: string, format := ReportFormat.Dot) {}
 
 }
 
