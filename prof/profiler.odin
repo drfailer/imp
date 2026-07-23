@@ -53,12 +53,8 @@ Parent_Profile_Info :: struct {
 
 when ENABLED {
 
-@(init)
-init_global_stopwatch :: proc "contextless" () {
-    time.stopwatch_start(&GLOBAL_STOPWATCH)
-}
-
 init :: proc() {
+    time.stopwatch_start(&GLOBAL_STOPWATCH)
 }
 
 fini :: proc() {
@@ -73,6 +69,11 @@ clear :: proc() {
         delete(profiler.entries)
     }
     sync.atomic_store(&THREAD_COUNTER, 0)
+}
+
+reset :: proc() {
+    time.stopwatch_reset(&GLOBAL_STOPWATCH)
+    time.stopwatch_start(&GLOBAL_STOPWATCH)
 }
 
 @(private="file")
@@ -91,6 +92,8 @@ get_profiler :: proc() -> ^Profiler {
 
 init :: proc() {}
 fini :: proc() {}
+clear :: proc() {}
+reset :: proc() {}
 
 }
 
@@ -234,6 +237,34 @@ print_report_to_file :: proc(filename: string, format := ReportFormat.Dot) {
 }
 
 @(private="file")
+time_to_rgb :: proc(dur, ttl: time.Duration) -> (r, g, b: u8) {
+    dur := f64(dur)
+    ttl := f64(ttl)
+    fr, fg, fb: f64
+    fr = 1
+    fg = 1
+    fb = 1
+
+    if dur < 0.25 * ttl {
+        fr = 0
+        fg = 4 * f64(dur) / f64(ttl)
+    } else if dur < 0.5 * ttl {
+        fr = 0
+        fb = 1 + 4 * (0.25 * ttl - dur) / ttl
+    } else if dur < 0.75 * ttl {
+        fr = 4 * (dur - 0.5 * ttl) / ttl
+        fb = 0
+    } else {
+        fg = 1 + 4 * (0.75 * ttl - dur) / ttl
+        fb = 0
+    }
+    r = cast(u8)clamp(fr * 255, 0, 255)
+    g = cast(u8)clamp(fg * 255, 0, 255)
+    b = cast(u8)clamp(fb * 255, 0, 255)
+    return r, g, b
+}
+
+@(private="file")
 generate_dot_file :: proc(file: ^os.File) {
     infos := gather_profile_infos()
     defer destroy_gathered_profile_infos(infos)
@@ -247,16 +278,12 @@ generate_dot_file :: proc(file: ^os.File) {
     for entry_name, entry in infos.entries {
         avg := time.Duration(f64(entry.ttl) / f64(entry.count))
         ttl_avg := time.Duration(f64(entry.ttl) / f64(entry.thread_count))
-        ratio   := f64(ttl_avg) / f64(infos.global_time)
-        percent := 100 * ratio
-        // determin the node colors
-        red := u8(255 * ratio)
-        green := u8(1 - 2 * abs(ratio - 0.5))
-        blue := u8(255 * (1 - ratio))
+        percent := 100 * f64(ttl_avg) / f64(infos.global_time)
+        r, g, b := time_to_rgb(ttl_avg, infos.global_time)
 
         fmt.fprintfln(file, "\"{}\" [label=\"{}\\ncount = {}\\navg = {}, min = {}, max = {}\\nttl = {} ({:.3f}%%)\\nthreads = {} ({})\",shape=rectangle,color=\"#%2X%2X%2X\",penwidth=2];",
             entry_name, entry_name, entry.count, avg, entry.min, entry.max, ttl_avg,
-            percent, entry.thread_count, entry.ttl, red, green, blue)
+            percent, entry.thread_count, entry.ttl, r, g, b)
 
         for parent_name, parent_info in entry.parents {
             parent_entry, parent_found := &infos.entries[parent_name]
