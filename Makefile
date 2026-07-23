@@ -14,3 +14,6 @@ playground:
 
 run:
 	odin run ./tests/playground/ -debug
+
+test:
+	odin test ./tests/dgemm/ -debug -thread-count:1

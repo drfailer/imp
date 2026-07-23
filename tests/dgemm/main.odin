@@ -390,8 +390,8 @@ main :: proc() {
         prof.fini()
     }
 
-    MATRIX_SIZE :: 10000
-    TILE_SIZE :: 1024
+    MATRIX_SIZE :: 20000
+    TILE_SIZE :: 2048
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
