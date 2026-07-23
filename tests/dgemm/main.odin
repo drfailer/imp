@@ -213,6 +213,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             q := &data.sum_state.queues[p.row_idx * TN + p.col_idx]
             if q.c != nil {
                 imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = q.c, p = p})
+                q.c = nil
             } else {
                 queue.enqueue(&q.ps, p)
             }
@@ -258,21 +259,11 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             c := tiles.c
             p := tiles.p
 
-            remaining_cols := tiles.c.cols % 4
-            cols := tiles.c.cols - remaining_cols
-            col: uint
-
             #no_bounds_check {
                 for row in 0..<tiles.c.rows {
                     croffset := row * c.ld
                     proffset := row * p.ld
-                    for col = 0; col < cols; col += 4 {
-                        c.data[croffset + col    ] += p.data[proffset + col    ]
-                        c.data[croffset + col + 1] += p.data[proffset + col + 1]
-                        c.data[croffset + col + 2] += p.data[proffset + col + 2]
-                        c.data[croffset + col + 3] += p.data[proffset + col + 3]
-                    }
-                    for col = cols; col < (cols + remaining_cols); col += 1 {
+                    for col in 0..<tiles.c.cols {
                         c.data[croffset + col] += p.data[proffset + col]
                     }
                 }
@@ -386,8 +377,8 @@ main :: proc() {
     defer common.matrix_destroy(&B)
     common.matrix_init(&C, 2, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&C)
-    // common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
-    // defer common.matrix_destroy(&E)
+    common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
+    defer common.matrix_destroy(&E)
 
     common.matrix_build(&A, .Float)
     common.matrix_build(&B, .Float)
@@ -395,9 +386,11 @@ main :: proc() {
 
     fmt.printfln("MATRIX_SIZE = {}, TILE_SIZE = {}", MATRIX_SIZE, TILE_SIZE)
 
-    // if prof.region("cblas") {
-    //     common.dot(A, B, E)
-    // }
+    prof.reset()
+
+    if prof.region("cblas") {
+        common.dot(A, B, E)
+    }
 
     cblas.openblas_set_num_threads(1)
 
@@ -405,9 +398,9 @@ main :: proc() {
         dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
     }
 
-    // commpare_matrices(C, E)
+    commpare_matrices(C, E)
 
-    prof.report({"dgemm"})
+    prof.report({"cblas", "dgemm"})
 
     if  MATRIX_SIZE < 16 {
         common.matrix_print(A, "A")
