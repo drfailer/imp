@@ -82,7 +82,7 @@ get_profiler :: proc() -> ^Profiler {
         ensure((PROFILER_INDEX - 1) < MAX_THREAD_COUNT)
         profiler := &PROFILERS[PROFILER_INDEX - 1]
         profiler.entries = make(map[string]Profile_Entry, INIT_ENTRIES_CAPACITY)
-        append(&profiler.stack, "src")
+        append(&profiler.stack, "main")
     }
     return &PROFILERS[PROFILER_INDEX - 1]
 }
@@ -192,8 +192,8 @@ report :: proc(target_entries: []string = {}) {
     print_entry :: proc(name: string, infos: Gathered_Profile_Infos) {
         entry := &infos.entries[name]
         avg := time.Duration(f64(entry.ttl) / f64(entry.count))
-        ttl_avg := f64(entry.ttl) / f64(entry.thread_count)
-        ratio   := ttl_avg / f64(infos.global_time)
+        ttl_avg := time.Duration(f64(entry.ttl) / f64(entry.thread_count))
+        ratio   := f64(ttl_avg) / f64(infos.global_time)
         percent := 100 * ratio
 
         fmt.println("ENTRY:", name)
@@ -212,6 +212,7 @@ report :: proc(target_entries: []string = {}) {
     }
 
     fmt.println("===================================== prof =====================================")
+    fmt.println()
     if len(target_entries) == 0 {
         for entry in infos.entries {
             print_entry(entry, infos)
@@ -240,8 +241,8 @@ generate_dot_file :: proc(file: ^os.File) {
     fmt.fprintln(file, "digraph Program_Execution {")
     fmt.fprintfln(file, "label=\"execution time = {}\";", infos.global_time)
 
-    // set the src entry
-    fmt.fprintfln(file, "src [label=\"{} ({})\",shape=rectangle];", os.args[0], infos.global_time)
+    // set the main entry
+    fmt.fprintfln(file, "main [label=\"{} ({})\",shape=rectangle];", os.args[0], infos.global_time)
 
     for entry_name, entry in infos.entries {
         avg := time.Duration(f64(entry.ttl) / f64(entry.count))
