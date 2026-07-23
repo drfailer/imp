@@ -262,17 +262,19 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             cols := tiles.c.cols - remaining_cols
             col: uint
 
-            for row in 0..<tiles.c.rows {
-                croffset := row * c.ld
-                proffset := row * p.ld
-                for col = 0; col < cols; col += 4 {
-                    c.data[croffset + col    ] += p.data[proffset + col    ]
-                    c.data[croffset + col + 1] += p.data[proffset + col + 1]
-                    c.data[croffset + col + 2] += p.data[proffset + col + 2]
-                    c.data[croffset + col + 3] += p.data[proffset + col + 3]
-                }
-                for col = cols; col < (cols + remaining_cols); col += 1 {
-                    c.data[croffset + col] += p.data[proffset + col]
+            #no_bounds_check {
+                for row in 0..<tiles.c.rows {
+                    croffset := row * c.ld
+                    proffset := row * p.ld
+                    for col = 0; col < cols; col += 4 {
+                        c.data[croffset + col    ] += p.data[proffset + col    ]
+                        c.data[croffset + col + 1] += p.data[proffset + col + 1]
+                        c.data[croffset + col + 2] += p.data[proffset + col + 2]
+                        c.data[croffset + col + 3] += p.data[proffset + col + 3]
+                    }
+                    for col = cols; col < (cols + remaining_cols); col += 1 {
+                        c.data[croffset + col] += p.data[proffset + col]
+                    }
                 }
             }
             imp.comms_send(&data.comms.sum_state, tiles, 2)
