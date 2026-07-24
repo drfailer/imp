@@ -50,11 +50,6 @@ Dgemm_Data :: struct {
     }
 }
 
-init_p_tile :: proc(tile: ^Matrix_Tile, data: rawptr, allocator: mem.Allocator) {
-    data := cast(^Dgemm_Data)data
-    common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows, allocator)
-}
-
 dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows: uint) {
     data.logger = log.create_console_logger(.Error, {.Level, .Short_File_Path, .Line, .Procedure, .Terminal_Color, .Thread_Id})
     data.TM = C.rows / tile_rows + (C.rows % tile_rows == 0 ? 0 : 1)
@@ -69,11 +64,11 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
     imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
 
-    p_capacity := data.TM * data.TN // * data.TK
-    p_elem_size := uint(size_of(Matrix_Tile) + size_of(rawptr))
-    p_tile_data_size := tile_rows * tile_cols * size_of(f64)
-    imp.pool_init(&data.tile_pools[3], p_capacity, init_p_tile, data,
-                  reserved = p_capacity * (p_elem_size + p_tile_data_size))
+    imp.pool_init(&data.tile_pools[3], data.TM * data.TN,
+        proc(tile: ^Matrix_Tile, data: rawptr) {
+            data := cast(^Dgemm_Data)data
+            common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
+        }, data)
 
     imp.comms_init(&data.comms.product_state)
     imp.comms_init(&data.comms.sum_state)
@@ -89,7 +84,9 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
     imp.pool_destroy(&data.tile_pools[0])
     imp.pool_destroy(&data.tile_pools[1])
     imp.pool_destroy(&data.tile_pools[2])
-    imp.pool_destroy(&data.tile_pools[3])
+    imp.pool_destroy_with_item_destroy(&data.tile_pools[3], proc(tile: ^Matrix_Tile, data: rawptr) {
+        common.matrix_tile_destroy(tile)
+    })
     imp.comms_destroy(&data.comms.product_state)
     imp.comms_destroy(&data.comms.sum_state)
 
@@ -124,7 +121,7 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             switch thread_index {
             case 0: imp.comms_send(&data.comms.product_state, cast(^Tile_A)tile, 0)
             case 1: imp.comms_send(&data.comms.product_state, cast(^Tile_B)tile, 1)
-            case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile, 0)
+            case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile, 2)
             }
         }
     }
@@ -229,13 +226,13 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                 value.c.row_idx, value.c.col_idx,
                 data.sum_state.progress_counter - 1)
 
+            imp.pool_release(&data.tile_pools[3], value.p)
+
             data.sum_state.progress_counter -= 1
             if data.sum_state.progress_counter == 0 {
                 terminate(ctx, data)
                 return
             }
-
-            imp.pool_release(&data.tile_pools[3], value.p)
 
             q := &data.sum_state.queues[value.c.row_idx * TN + value.c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
@@ -258,7 +255,7 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         case Product_Data:
             prof.region("product_task")
             common.dot(tiles.a, tiles.b, tiles.p)
-            imp.comms_send(&data.comms.sum_state, tiles, 1)
+            imp.comms_send(&data.comms.sum_state, tiles, 0)
         case Sum_Data:
             prof.region("sum_task")
             c := tiles.c
@@ -277,7 +274,7 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                     cr[col] += pr[col]
                 }
             }
-            imp.comms_send(&data.comms.sum_state, tiles, 2)
+            imp.comms_send(&data.comms.sum_state, tiles, 1)
         }
     }
 }
@@ -402,8 +399,8 @@ main :: proc() {
     defer common.matrix_destroy(&B)
     common.matrix_init(&C, 2, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&C)
-    common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
-    defer common.matrix_destroy(&E)
+    // common.matrix_init(&E, 3, MATRIX_SIZE, MATRIX_SIZE)
+    // defer common.matrix_destroy(&E)
 
     common.matrix_build(&A, .Float)
     common.matrix_build(&B, .Float)
@@ -413,9 +410,9 @@ main :: proc() {
 
     prof.reset()
 
-    if prof.region("cblas") {
-        common.dot(A, B, E)
-    }
+    // if prof.region("cblas") {
+    //     common.dot(A, B, E)
+    // }
 
     cblas.openblas_set_num_threads(1)
 
@@ -423,13 +420,13 @@ main :: proc() {
         dgemm(A, B, C, TILE_SIZE, TILE_SIZE)
     }
 
-    if commpare_matrices(C, E) == true {
-        fmt.println("[SUCCESS]: matricies equal")
-    } else {
-        fmt.println("[FAIL]: matricies not equal")
-    }
+    // if commpare_matrices(C, E) == true {
+    //     fmt.println("[SUCCESS]: matricies equal")
+    // } else {
+    //     fmt.println("[FAIL]: matricies not equal")
+    // }
 
-    prof.report({"cblas", "dgemm"})
+    prof.report({"dgemm"})
 
     if  MATRIX_SIZE < 16 {
         common.matrix_print(A, "A")
