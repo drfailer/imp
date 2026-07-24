@@ -127,19 +127,16 @@ Comms :: struct($T: typeid) {
     cond:     sync.Cond,
 }
 
-comms_init_channels :: proc(comms: ^Comms($T), channel_count: int, allocator := context.allocator) {
+comms_init :: proc(comms: ^Comms($T), channel_count: int, allocator := context.allocator) {
     comms.channels = make([dynamic]Comm(T), channel_count, allocator)
     for &channel in comms.channels {
         comm_init(&channel, allocator)
     }
 }
 
-comms_init_union :: proc(comms: ^Comms($T), allocator := context.allocator) where intrinsics.type_is_union(T) {
-    type_info := type_info_of(T)
-    comms_init(comms, len(type_info.variant.(runtime.Type_Info_Union).variants), allocator)
+type_comms_init :: proc(comms: ^Comms($U), allocator := context.allocator) where intrinsics.type_is_union(U) {
+    comms_init(comms, intrinsics.type_union_variant_count(U), allocator)
 }
-
-comms_init :: proc{ comms_init_channels, comms_init_union }
 
 comms_destroy :: proc(comms: ^Comms($T)) {
     for &channel in comms.channels {
@@ -189,6 +186,10 @@ comms_send :: proc(comms: ^Comms($T), data: T, channel := 0) {
         sync.signal(&comms.cond)
         sync.unlock(&comms.mutex)
     }
+}
+
+type_comms_send :: proc(comms: ^Comms($U), data: $T) where intrinsics.type_is_union(U) {
+    comms_send(comms, data, intrinsics.type_variant_index_of(U, T))
 }
 
 comms_wait :: proc(comms: ^Comms($T)) -> bool {
@@ -265,6 +266,12 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0)
     }
 }
 
+type_comms_recv :: proc(comms: ^Comms($U), $T: typeid) -> (data: T, received: bool)
+    where intrinsics.type_is_union(U) {
+    udata := comms_recv(comms, intrinsics.type_variant_index_of(U, T)) or_return
+    return udata.(T), true
+}
+
 comms_try_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0) -> (data: T, received: bool) {
     if channel != ANY_CHANNEL {
         return comm_try_recv(&comms.channels[channel])
@@ -283,6 +290,12 @@ comms_try_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index :
     }
 
     return {}, false
+}
+
+type_comms_try_recv :: proc(comms: ^Comms($U), $T: typeid) -> (data: T, received: bool)
+    where intrinsics.type_is_union(U) {
+    udata := comms_try_recv(comms, intrinsics.type_variant_index_of(U, T)) or_return
+    return udata.(T), true
 }
 
 // assembly line ///////////////////////////////////////////////////////////////

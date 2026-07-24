@@ -70,8 +70,8 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
             common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
         }, data)
 
-    imp.comms_init(&data.comms.product_state)
-    imp.comms_init(&data.comms.sum_state)
+    imp.type_comms_init(&data.comms.product_state)
+    imp.type_comms_init(&data.comms.sum_state)
 
     imp.assembly_line_init(&data.comms.tasks)
 
@@ -119,9 +119,9 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                                     min(data.tile_rows, m.rows - row),
                                     min(data.tile_cols, m.cols - col))
             switch thread_index {
-            case 0: imp.comms_send(&data.comms.product_state, cast(^Tile_A)tile, 0)
-            case 1: imp.comms_send(&data.comms.product_state, cast(^Tile_B)tile, 1)
-            case 2: imp.comms_send(&data.comms.sum_state, cast(^Tile_C)tile, 2)
+            case 0: imp.type_comms_send(&data.comms.product_state, cast(^Tile_A)tile)
+            case 1: imp.type_comms_send(&data.comms.product_state, cast(^Tile_B)tile)
+            case 2: imp.type_comms_send(&data.comms.sum_state, cast(^Tile_C)tile)
             }
         }
     }
@@ -135,8 +135,17 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     prof.procedure()
 
     product := proc(ctx: imp.Ctx, data: ^Dgemm_Data, a, b: ^Matrix_Tile) {
+        // wait version
         p, ok := imp.pool_alloc(&data.tile_pools[3], .Wait)
-        assert(ok)
+        // busy wait version
+        // p: ^Matrix_Tile
+        // ok: bool
+        // for {
+        //     p, ok = imp.pool_alloc(&data.tile_pools[3], .Fail)
+        //     if ok do break
+        //     tiles := imp.assembly_line_get(&data.comms.tasks) or_continue
+        //     tasks_process(data, tiles)
+        // }
         p.rows = a.rows
         p.cols = b.rows
         p.row_idx = a.row_idx
@@ -244,38 +253,41 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     }
 }
 
+tasks_process :: proc(data: ^Dgemm_Data, udata: union {Product_Data, Sum_Data}) {
+    switch tiles in udata {
+    case Product_Data:
+        prof.region("product_task")
+        common.dot(tiles.a, tiles.b, tiles.p)
+        imp.type_comms_send(&data.comms.sum_state, tiles)
+    case Sum_Data:
+        prof.region("sum_task")
+        c := tiles.c
+        p := tiles.p
+
+        c_ptr := c.data
+        p_ptr := p.data
+        c_ld := c.ld
+        p_ld := p.ld
+        rows := tiles.c.rows
+        cols := tiles.c.cols
+        #no_bounds_check for row in 0..<rows {
+            cr := c_ptr[row * c_ld:]
+            pr := p_ptr[row * p_ld:]
+            for col in 0..<cols {
+                cr[col] += pr[col]
+            }
+        }
+        imp.type_comms_send(&data.comms.sum_state, tiles)
+    }
+}
+
 tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     prof.procedure()
 
     for {
         prof.region("tasks_dequeue_compute")
         udata := imp.assembly_line_get(&data.comms.tasks) or_break
-
-        switch tiles in udata {
-        case Product_Data:
-            prof.region("product_task")
-            common.dot(tiles.a, tiles.b, tiles.p)
-            imp.comms_send(&data.comms.sum_state, tiles, 0)
-        case Sum_Data:
-            prof.region("sum_task")
-            c := tiles.c
-            p := tiles.p
-
-            c_ptr := c.data
-            p_ptr := p.data
-            c_ld := c.ld
-            p_ld := p.ld
-            rows := tiles.c.rows
-            cols := tiles.c.cols
-            #no_bounds_check for row in 0..<rows {
-                cr := c_ptr[row * c_ld:]
-                pr := p_ptr[row * p_ld:]
-                for col in 0..<cols {
-                    cr[col] += pr[col]
-                }
-            }
-            imp.comms_send(&data.comms.sum_state, tiles, 1)
-        }
+        tasks_process(data, udata)
     }
 }
 
