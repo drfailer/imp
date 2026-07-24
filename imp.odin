@@ -255,33 +255,41 @@ sync_vals_slice :: proc(ctx: Ctx, master_index: int, vals: []$T) {
     if vals == nil do return
 
     shared_ctx := get_shared_ctx(ctx)
+    thread_index := get_thread_index(ctx)
 
-    if get_thread_index(ctx) == master_index {
+    if thread_index == master_index {
         shared_ctx.sync = runtime.Raw_Slice{raw_data(vals), len(vals)}
     }
     barrier(ctx, .Spin)
-    if get_thread_index(ctx) != master_index {
+    if thread_index != master_index {
         master_vals := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
-        assert(len(vals) == len(master_vals))
+        when ODIN_DEBUG {
+            assert(len(vals) == len(master_vals))
+        }
         mem.copy(raw_data(vals), raw_data(master_vals), len(vals) * size_of(T))
     }
     barrier(ctx, .Spin)
 }
 
 sync_vals_variadic :: proc(ctx: Ctx, master_index: int, $T: typeid, vals: ..^T) {
-    vals_array := make([]T, len(vals), context.temp_allocator)
+    shared_ctx := get_shared_ctx(ctx)
+    thread_index := get_thread_index(ctx)
 
-    if get_thread_index(ctx) == master_index {
+    if thread_index == master_index {
+        vals_array := make([]T, len(vals), context.temp_allocator)
         for val, idx in vals {
             vals_array[idx] = val^
         }
+        shared_ctx.sync = runtime.Raw_Slice{raw_data(vals_array), len(vals_array)}
     }
-    sync_vals_slice(ctx, master_index, vals_array[:])
-    if get_thread_index(ctx) != master_index {
+    barrier(ctx, .Spin)
+    if thread_index != master_index {
+        master_vals := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
         for val, idx in vals {
-            val^ = vals_array[idx]
+            val^ = master_vals[idx]
         }
     }
+    barrier(ctx, .Spin)
 }
 
 sync_vals :: proc{
@@ -291,12 +299,13 @@ sync_vals :: proc{
 
 sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) {
     shared_ctx := get_shared_ctx(ctx)
+    thread_index := get_thread_index(ctx)
 
-    if get_thread_index(ctx) == master_index {
+    if thread_index == master_index {
         shared_ctx.sync = cast(rawptr)val
     }
     barrier(ctx, .Spin)
-    if get_thread_index(ctx) != master_index {
+    if thread_index != master_index {
         val^ = (cast(^T)shared_ctx.sync.(rawptr))^
     }
     barrier(ctx, .Spin)
