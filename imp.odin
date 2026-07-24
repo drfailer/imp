@@ -86,7 +86,6 @@ alloc_shared_ctx :: proc(ctx: ^Global_Ctx) -> ^Shared_Ctx {
     }
     allocator := mem.dynamic_arena_allocator(&ctx.arena)
     shared_ctx := new(Shared_Ctx, allocator)
-    shared_ctx.thread_index_map = make([dynamic]^Thread_Ctx, allocator = allocator)
     return shared_ctx
 }
 
@@ -137,19 +136,19 @@ thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
 Shared_Ctx :: struct {
     parent: ^Shared_Ctx,
     thread_count: int,
+    thread_index_offset: int,
     cond: sync.Cond,
     mutex: sync.Mutex,
-    thread_index_map: [dynamic]^Thread_Ctx, // map local index to thread data (used by recv/send API)
     branch: struct #align(64) {
         generation: int,      // Solves the fast-laps-slow hazard
         _pad_gen: [64 - size_of(int)]u8,
         ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
         _pad0: [64 - size_of([2]^Shared_Ctx)]u8,
-        init_counter: int,    // Slot claiming
-        _pad1: [64 - size_of(int)]u8,
         fini_counter: int,    // Exit reference count
-        _pad2: [64 - size_of(int)]u8,
+        _pad1: [64 - size_of(int)]u8,
         arrival_counter: int, // ASAP reset counter
+        _pad2: [64 - size_of(int)]u8,
+        join_sema: sync.Sema, // wakes branch-closing threads in join
     },
     sync: union { // use for synchronizing values
         rawptr,
@@ -164,7 +163,6 @@ shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count, comm_channel_count: int)
 }
 
 shared_ctx_destroy :: proc(ctx: ^Shared_Ctx) {
-    delete(ctx.thread_index_map)
 }
 
 //
@@ -357,13 +355,10 @@ branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bo
     parent_local := get_local_ctx(ctx)
     parent_ctx := parent_local.shared_ctx
 
-    // The exact generation we need for THIS branch at THIS nesting level
     my_expected_gen := parent_local.branch_generation + 1
 
     // =========================================================================
     // LOOP 1: Wait for Reset
-    // If the generation is older than expected AND pointers aren't nil,
-    // the previous branch hasn't finished its ASAP reset yet.
     // =========================================================================
     if sync.atomic_load_explicit(&parent_ctx.branch.generation, .Acquire) < my_expected_gen &&
        sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire) != nil
@@ -390,26 +385,20 @@ branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bo
             node1 := alloc_shared_ctx(ctx.global_ctx)
 
             node0.thread_count = thread_count
-            clear(&node0.thread_index_map)
-            resize(&node0.thread_index_map, node0.thread_count)
+            node0.thread_index_offset = parent_ctx.thread_index_offset
             barrier_init(&node0.barrier, node0.thread_count)
-            node0.branch.init_counter = 0
             node0.branch.fini_counter = node0.thread_count
             node0.parent = parent_ctx
 
             node1.thread_count = parent_ctx.thread_count - thread_count
-            clear(&node1.thread_index_map)
-            resize(&node1.thread_index_map, node1.thread_count)
+            node1.thread_index_offset = parent_ctx.thread_index_offset + thread_count
             barrier_init(&node1.barrier, node1.thread_count)
-            node1.branch.init_counter = 0
             node1.branch.fini_counter = node1.thread_count
             node1.parent = parent_ctx
 
-            // Protect state mutation to prevent lost wakeups for Loop 2
             sync.mutex_lock(&parent_ctx.mutex)
             sync.atomic_store_explicit(&parent_ctx.branch.ctxs[0], node0, .Release)
             sync.atomic_store_explicit(&parent_ctx.branch.ctxs[1], node1, .Release)
-            // Bump generation LAST to signal readiness
             sync.atomic_store_explicit(&parent_ctx.branch.generation, my_expected_gen, .Release)
             sync.mutex_unlock(&parent_ctx.mutex)
 
@@ -429,31 +418,24 @@ branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bo
     }
 
     // =========================================================================
-    // CLAIM: Slots and prepare local context
+    // CLAIM: Deterministic assignment by parent thread_index
     // =========================================================================
     ctx0 := sync.atomic_load_explicit(&parent_ctx.branch.ctxs[0], .Acquire)
     ctx1 := sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire)
 
     if branch_ctx != nil do branch_ctx^ = {ctx0, ctx1}
 
-    idx0 := sync.atomic_add_explicit(&ctx0.branch.init_counter, 1, .Relaxed)
-
     new_local: Local_Ctx
-    if idx0 < ctx0.thread_count {
-        // Fresh generation for the nested scope
-        new_local = Local_Ctx{ shared_ctx = ctx0, thread_index = idx0, branch_generation = 0 }
-        sync.atomic_store_explicit(&ctx0.thread_index_map[idx0], ctx.thread_ctx, .Release)
+    if parent_local.thread_index < thread_count {
+        new_local = Local_Ctx{ shared_ctx = ctx0, thread_index = parent_local.thread_index, branch_generation = 0 }
     } else {
-        idx1 := sync.atomic_add_explicit(&ctx1.branch.init_counter, 1, .Relaxed)
-        new_local = Local_Ctx{ shared_ctx = ctx1, thread_index = idx1, branch_generation = 0 }
-        sync.atomic_store_explicit(&ctx1.thread_index_map[idx1], ctx.thread_ctx, .Release)
+        new_local = Local_Ctx{ shared_ctx = ctx1, thread_index = parent_local.thread_index - thread_count, branch_generation = 0 }
     }
 
-    // Advance our local generation tracker for the parent context
     parent_local.branch_generation = my_expected_gen
 
     // =========================================================================
-    // ASAP RESET: Last thread to arrive cleans the state
+    // ASAP RESET: Last thread to arrive cleans the state and wakes join waiters
     // =========================================================================
     arrivals := sync.atomic_add_explicit(&parent_ctx.branch.arrival_counter, 1, .Relaxed)
     if arrivals == parent_ctx.thread_count - 1 {
@@ -465,34 +447,20 @@ branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bo
         sync.mutex_unlock(&parent_ctx.mutex)
 
         sync.cond_broadcast(&parent_ctx.cond)
+        sync.sema_post(&parent_ctx.branch.join_sema, 2)
     }
 
     append(&ctx.thread_ctx.ctx_stack, new_local)
     return new_local.shared_ctx == ctx0
 }
 
-// FIXME: the last thread of each branch should not release the ctx, but the
-// last thread of the parent branch (last thread overall) should release both
-// branches
 join :: proc(ctx: Ctx) {
     cur_ctx := get_shared_ctx(ctx)
     parent_ctx := cur_ctx.parent
 
     prev_count := sync.atomic_sub_explicit(&cur_ctx.branch.fini_counter, 1, .Relaxed)
     if prev_count == 1 {
-        // =========================================================================
-        // WAIT RESET: if a branch is too quick, we prenvent threads to release any
-        // of the branches states before all the threads of the parent context are
-        // setup
-        // =========================================================================
-        for {
-            if sync.atomic_load_explicit(&parent_ctx.branch.ctxs[0], .Acquire) == nil &&
-               sync.atomic_load_explicit(&parent_ctx.branch.ctxs[1], .Acquire) == nil {
-                break
-            }
-            sync.guard(&parent_ctx.mutex)
-            sync.wait(&parent_ctx.cond, &parent_ctx.mutex)
-        }
+        sync.sema_wait(&parent_ctx.branch.join_sema)
         release_shared_ctx(ctx.global_ctx, cur_ctx)
     }
     pop(&ctx.thread_ctx.ctx_stack)
@@ -513,30 +481,16 @@ join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
 //
 
 @(private)
-get_thread_data_from_index_and_wait_if_not_available :: proc(ctx: ^Shared_Ctx, index: int) -> ^Thread_Ctx {
-    if index < 0 || index >= ctx.thread_count {
-        panic("the target thread does not exist")
-    }
-
-    // threads going into a branch do not wait for the other threads so we need
-    // to wait for the thread_data to be available if the initialization is not
-    // done yet (most of the time, thread won't wait).
-    backoff := SPIN_BACKOFF_INIT
-    for {
-        thread_data := sync.atomic_load_explicit(&ctx.thread_index_map[index], .Acquire)
-        if thread_data != nil do return thread_data
-        spin_backoff(&backoff)
-    }
+get_thread_ctx_by_local_index :: #force_inline proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, index: int) -> ^Thread_Ctx {
+    return &ctx.global_ctx.thread_ctxs[shared_ctx.thread_index_offset + index]
 }
 
 send_data_parallel_ctx_data :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
     shared_ctx := get_local_ctx(ctx).shared_ctx
     if thread_index >= 0 {
-        // local send
-        receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
+        receiver_data := get_thread_ctx_by_local_index(ctx, shared_ctx, thread_index)
         comms_send(&receiver_data.comms, Message(Data){get_thread_index(ctx), data}, channel)
     } else {
-        // global send
         receiver_data := &ctx.global_ctx.thread_ctxs[~thread_index]
         comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
     }
@@ -549,7 +503,7 @@ send_data_parallel_ctx_poly :: proc(ctx: Ctx, thread_index: int, data: ^$T, chan
 send_data_shared_ctx_data :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
     assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
     assert(thread_index >= 0)
-    receiver_data := get_thread_data_from_index_and_wait_if_not_available(shared_ctx, thread_index)
+    receiver_data := get_thread_ctx_by_local_index(ctx, shared_ctx, thread_index)
     comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
 }
 
