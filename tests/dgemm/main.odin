@@ -2,6 +2,7 @@ package dgemm
 
 import "../../"
 import "../../prof"
+import "../../deadlock"
 import "../common"
 import "../common/cblas"
 import "core:mem"
@@ -101,6 +102,7 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
 }
 
 split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    deadlock.checkpoint()
     prof.procedure()
     thread_index := imp.get_thread_index(ctx)
 
@@ -132,6 +134,7 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    deadlock.checkpoint()
     prof.procedure()
 
     product := proc(ctx: imp.Ctx, data: ^Dgemm_Data, a, b: ^Matrix_Tile) {
@@ -164,6 +167,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         prof.region("product_state_compute")
         #no_bounds_check switch value in udata {
         case ^Tile_A:
+            deadlock.checkpoint("product_tile_a")
             a := cast(^Matrix_Tile)value
             log.debugf("product_state: A[{},{}]", a.row_idx, a.col_idx)
             assert(data.product_state.a_tiles[a.row_idx * TK + a.col_idx] == nil)
@@ -173,6 +177,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                 if b != nil do product(ctx, data, a, b)
             }
         case ^Tile_B:
+            deadlock.checkpoint("product_tile_b")
             b := cast(^Matrix_Tile)value
             log.debugf("product_state: B[{},{}]", b.row_idx, b.col_idx)
             assert(data.product_state.b_tiles[b.row_idx * TN + b.col_idx] == nil)
@@ -186,6 +191,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    deadlock.checkpoint()
     prof.procedure()
 
     TM := data.TM
@@ -204,6 +210,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         prof.region("sum_state_compute")
         switch value in udata {
         case ^Tile_C:
+            deadlock.checkpoint("sum_tile_c")
             c := cast(^Matrix_Tile)value
 
             log.debugf("sum_state: C[{},{}]", c.row_idx, c.col_idx)
@@ -215,6 +222,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                 q.c = c
             }
         case Product_Data:
+            deadlock.checkpoint("sum_tile_product_data")
             p := value.p
 
             log.debugf("sum_state: Product_Data(A[{},{}], B[{},{}], P[{},{}])",
@@ -230,12 +238,13 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                 queue.enqueue(&q.ps, p)
             }
         case Sum_Data:
+            deadlock.checkpoint("sum_tile_sum_data")
             log.debugf("sum_state: Sum_Data(P[{},{}], C[{},{}]) (progress = {})",
                 value.p.row_idx, value.p.col_idx,
                 value.c.row_idx, value.c.col_idx,
                 data.sum_state.progress_counter - 1)
 
-            imp.pool_release(&data.tile_pools[3], value.p)
+            // imp.pool_release(&data.tile_pools[3], value.p)
 
             data.sum_state.progress_counter -= 1
             if data.sum_state.progress_counter == 0 {
@@ -256,10 +265,12 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 tasks_process :: proc(data: ^Dgemm_Data, udata: union {Product_Data, Sum_Data}) {
     switch tiles in udata {
     case Product_Data:
+        deadlock.checkpoint("product_task")
         prof.region("product_task")
         common.dot(tiles.a, tiles.b, tiles.p)
         imp.type_comms_send(&data.comms.sum_state, tiles)
     case Sum_Data:
+        deadlock.checkpoint("sum_task")
         prof.region("sum_task")
         c := tiles.c
         p := tiles.p
@@ -282,6 +293,7 @@ tasks_process :: proc(data: ^Dgemm_Data, udata: union {Product_Data, Sum_Data}) 
 }
 
 tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    deadlock.checkpoint()
     prof.procedure()
 
     for {
@@ -295,12 +307,14 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 // close all communicators which will make the task leave when the queues are empty
 //
 terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    deadlock.checkpoint()
     fmt.println("terminate")
     imp.comms_set_closed(&data.comms.sum_state)
     imp.assembly_line_set_stop(&data.comms.tasks)
 }
 
 dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    deadlock.checkpoint()
     prof.procedure()
     context.logger = data.logger
 
@@ -317,6 +331,7 @@ dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 }
 
 dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
+    deadlock.checkpoint()
     data: Dgemm_Data
     dgemm_data_init(&data, A, B, C, tile_rows, tile_cols)
     defer dgemm_data_destroy(&data)
@@ -324,7 +339,7 @@ dgemm :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
     context.logger = data.logger
 
     global_ctx: imp.Global_Ctx
-    imp.global_ctx_init(&global_ctx, 40)
+    imp.global_ctx_init(&global_ctx, 6)
     defer imp.global_ctx_destroy(&global_ctx)
     imp.launch(&global_ctx, dgemm_parallel, &data)
 }
@@ -402,8 +417,8 @@ main :: proc() {
         prof.fini()
     }
 
-    MATRIX_SIZE :: 20000
-    TILE_SIZE :: 2048
+    MATRIX_SIZE :: 1024
+    TILE_SIZE :: 256
     A, B, C, E: Matrix
     common.matrix_init(&A, 0, MATRIX_SIZE, MATRIX_SIZE)
     defer common.matrix_destroy(&A)
