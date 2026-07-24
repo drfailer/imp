@@ -350,10 +350,134 @@ range_next :: proc{
 
 // reduce //////////////////////////////
 
-// TODO: we will need more reduction functions depending on the situation
+reduce_imut :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
+    when ODIN_DEBUG { assert(len(values) > 0) }
 
-reduce :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
-    // TODO
+    shared_ctx := get_shared_ctx(ctx)
+    thread_index := get_thread_index(ctx)
+    thread_count := get_thread_count(ctx)
+    count := len(values)
+
+    r := range_init(ctx, count)
+    local_result: T
+    if r.it < r.max {
+        local_result = values[r.it]
+        for i in r.it + 1 ..< r.max {
+            local_result = op(values[i], local_result)
+        }
+    }
+
+    if thread_count == 1 do return local_result
+
+    if thread_index == 0 {
+        partials := make([]T, thread_count, get_scratch_allocator(ctx))
+        shared_ctx.sync = runtime.Raw_Slice{raw_data(partials), len(partials)}
+    }
+    barrier(ctx)
+    partials := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
+    if r.it < r.max do partials[thread_index] = local_result
+    barrier(ctx)
+
+    effective_count: int
+    if thread_count >= count {
+        effective_count = count
+    } else {
+        step := count / thread_count + (count % thread_count == 0 ? 0 : 1)
+        effective_count = (count - 1) / step + 1
+    }
+    result := partials[0]
+    for i in 1 ..< effective_count {
+        result = op(partials[i], result)
+    }
+    barrier(ctx)
+    return result
+}
+
+reduce_mut :: proc(ctx: Ctx, values: []$T, op: proc(val: T, acc: ^T)) -> T {
+    when ODIN_DEBUG { assert(len(values) > 0) }
+
+    shared_ctx := get_shared_ctx(ctx)
+    thread_index := get_thread_index(ctx)
+    thread_count := get_thread_count(ctx)
+    count := len(values)
+
+    r := range_init(ctx, count)
+    local_result: T
+    if r.it < r.max {
+        local_result = values[r.it]
+        for i in r.it + 1 ..< r.max {
+            op(values[i], &local_result)
+        }
+    }
+
+    if thread_count == 1 do return local_result
+
+    if thread_index == 0 {
+        partials := make([]T, thread_count, get_scratch_allocator(ctx))
+        shared_ctx.sync = runtime.Raw_Slice{raw_data(partials), len(partials)}
+    }
+    barrier(ctx)
+    partials := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
+    if r.it < r.max do partials[thread_index] = local_result
+    barrier(ctx)
+
+    effective_count: int
+    if thread_count >= count {
+        effective_count = count
+    } else {
+        step := count / thread_count + (count % thread_count == 0 ? 0 : 1)
+        effective_count = (count - 1) / step + 1
+    }
+    result := partials[0]
+    for i in 1 ..< effective_count {
+        op(partials[i], &result)
+    }
+    barrier(ctx)
+    return result
+}
+
+Reduce_Op :: enum {
+    And,
+    Or,
+    Add,
+    Sub,
+    Mul,
+    Mut_And,
+    Mut_Or,
+    Mut_Add,
+    Mut_Sub,
+    Mut_Mul,
+}
+
+reduce_builtins :: proc(ctx: Ctx, values: []$T, $op: Reduce_Op) -> T {
+    when op == .And {
+        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val && acc })
+    } else when op == .Or {
+        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val || acc })
+    } else when op == .Add {
+        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val + acc })
+    } else when op == .Sub {
+        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val - acc })
+    } else when op == .Mul {
+        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val * acc })
+    } else when op == .Mut_And {
+        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ &= val })
+    } else when op == .Mut_Or {
+        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ |= val })
+    } else when op == .Mut_Add {
+        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ += val })
+    } else when op == .Mut_Sub {
+        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ -= val })
+    } else when op == .Mut_Mul {
+        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ *= val })
+    }
+    panic("unreachable")
+}
+
+reduce :: proc{
+    reduce_imut,
+    reduce_mut,
+    reduce_builtins,
 }
 
 // branch //////////////////////////////

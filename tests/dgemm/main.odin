@@ -349,11 +349,9 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) -> bool {
         }
         imp.barrier(ctx)
 
+        result := imp.reduce_builtins(ctx, results[:], .And)
         if imp.single(ctx, 0) {
-            data.result = true
-            for result in results {
-                data.result &= result
-            }
+            data.result = result
             delete(results)
         }
     }
