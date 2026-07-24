@@ -8,7 +8,7 @@ SPIN_BACKOFF_INIT :: 1
 SPIN_BACKOFF_MAX :: 64
 
 @(private)
-spin_backoff :: proc(count: ^int) {
+spin_backoff :: #force_inline proc(count: ^int) {
     for _ in 0..<count^ {
         intrinsics.cpu_relax()
     }
