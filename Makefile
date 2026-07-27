@@ -16,4 +16,4 @@ run:
 	odin run ./tests/playground/ -debug
 
 test:
-	odin test ./tests/dgemm/ -debug -thread-count:1
+	odin test ./tests/dgemm/ -debug -thread-count:1 -define:PROF_ENABLED=true
