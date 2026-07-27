@@ -13,7 +13,7 @@ MEM_PROFILING_ENABLED :: #config(IMP_MEM_PROFILING_ENABLED, true)
 Pool_Alloc_Mode :: enum {
     Fail,
     Wait,
-    Dynamic,
+    Grow,
 }
 
 @(private)
@@ -89,7 +89,7 @@ pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, 
         pool.free_list = node._next
         node._next = node
         return node, true
-    case .Dynamic:
+    case .Grow:
         allocator := mem.dynamic_arena_allocator(&pool.arena)
         node := new(Pool_Node(T), allocator)
         if pool.elem_init != nil do pool.elem_init(node, pool.elem_init_data)
@@ -99,11 +99,11 @@ pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, 
     panic("unreachable")
 }
 
-pool_release :: proc(pool: ^Pool($T), elem: ^T) {
+pool_release :: proc(pool: ^Pool($T), elem: ^T, loc := #caller_location) {
     when MEM_PROFILING_ENABLED do prof.procedure()
     node := cast(^Pool_Node(T))elem
     when ODIN_DEBUG {
-        if node._next != node do panic("tried to release an invalid or corrupted element")
+        if node._next != node do panic("tried to release an invalid or corrupted element", loc = loc)
     }
     if sync.guard(&pool.mutex) {
         node._next = pool.free_list
