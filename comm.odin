@@ -1,9 +1,12 @@
 package imp
 
+import "prof"
 import "core:sync"
 import "core:mem"
 import "base:intrinsics"
 import "base:runtime"
+
+COMM_PROFILING_ENABLED :: #config(IMP_COMM_PROFILING_ENABLED, false)
 
 // Messages ////////////////////////////////////////////////////////////////////
 
@@ -31,6 +34,7 @@ comm_destroy :: proc(comm: ^Comm($T)) {
 }
 
 comm_set_closed :: proc(comm: ^Comm($T), closed := true) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     intrinsics.atomic_store(&comm.closed, closed)
     if intrinsics.atomic_load(&comm.waiters) > 0 {
         sync.lock(&comm.mutex)
@@ -44,6 +48,7 @@ comm_closed :: proc(comm: ^Comm($T)) -> bool {
 }
 
 comm_wait_open :: proc(comm: ^Comm($T)) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     for intrinsics.atomic_load(&comm.closed) {
         sync.lock(&comm.mutex)
         intrinsics.atomic_add(&comm.waiters, 1)
@@ -58,6 +63,7 @@ comm_wait_open :: proc(comm: ^Comm($T)) {
 }
 
 comm_send :: proc(comm: ^Comm($T), m: T) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     queue_push(&comm.queue, m)
     if intrinsics.atomic_load(&comm.waiters) > 0 {
         sync.lock(&comm.mutex)
@@ -67,6 +73,7 @@ comm_send :: proc(comm: ^Comm($T), m: T) {
 }
 
 comm_wait :: proc(comm: ^Comm($T)) -> bool {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     if intrinsics.atomic_load(&comm.closed) do return false
 
     intrinsics.atomic_add(&comm.waiters, 1)
@@ -83,6 +90,7 @@ comm_wait :: proc(comm: ^Comm($T)) -> bool {
 }
 
 comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     if m, ok = queue_pop(&comm.queue); ok {
         return m, true
     }
@@ -102,6 +110,7 @@ comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
         }
 
         if !intrinsics.atomic_load(&comm.closed) {
+            when COMM_PROFILING_ENABLED do prof.region("comm_recv_wait")
             sync.wait(&comm.cond, &comm.mutex)
         }
 
@@ -111,6 +120,7 @@ comm_recv :: proc(comm: ^Comm($T)) -> (m: T, ok: bool) {
 }
 
 comm_try_recv :: proc(comm: ^Comm($T)) -> (m: T, received: bool) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     return queue_pop(&comm.queue)
 }
 
@@ -146,6 +156,7 @@ comms_destroy :: proc(comms: ^Comms($T)) {
 }
 
 comms_set_closed :: proc(comms: ^Comms($T), closed := true) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     for &channel in comms.channels {
         comm_set_closed(&channel, closed)
     }
@@ -164,6 +175,7 @@ comms_is_closed :: proc(comms: ^Comms($T)) -> bool {
 }
 
 comms_wait_open :: proc(comms: ^Comms($T)) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     for intrinsics.atomic_load(&comms.closed) {
         sync.lock(&comms.mutex)
         intrinsics.atomic_add(&comms.waiters, 1)
@@ -178,6 +190,7 @@ comms_wait_open :: proc(comms: ^Comms($T)) {
 }
 
 comms_send :: proc(comms: ^Comms($T), data: T, channel := 0) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     comm_send(&comms.channels[channel], data)
 
     // wake up any global ANY_CHANNEL waiters
@@ -193,6 +206,7 @@ type_comms_send :: proc(comms: ^Comms($U), data: $T) where intrinsics.type_is_un
 }
 
 comms_wait :: proc(comms: ^Comms($T)) -> bool {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     if intrinsics.atomic_load(&comms.closed) do return false
 
     intrinsics.atomic_add(&comms.waiters, 1)
@@ -209,6 +223,7 @@ comms_wait :: proc(comms: ^Comms($T)) -> bool {
 }
 
 comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0) -> (data: T, received: bool) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     if channel != ANY_CHANNEL {
         return comm_recv(&comms.channels[channel])
     }
@@ -251,6 +266,7 @@ comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0)
         }
 
         if !intrinsics.atomic_load(&comms.closed) {
+            when COMM_PROFILING_ENABLED do prof.region("comms_recv_wait")
             sync.wait(&comms.cond, &comms.mutex)
         }
 
@@ -294,6 +310,7 @@ comms_try_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index :
 
 type_comms_try_recv :: proc(comms: ^Comms($U), $T: typeid) -> (data: T, received: bool)
     where intrinsics.type_is_union(U) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     udata := comms_try_recv(comms, intrinsics.type_variant_index_of(U, T)) or_return
     return udata.(T), true
 }
@@ -323,10 +340,12 @@ assembly_line_init :: proc(line: ^Assembly_Line($T, $S)) {
 }
 
 assembly_line_set_stop :: proc(line: ^Assembly_Line($T, $S), stop := true) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     sync.atomic_store_explicit(&line.stop, stop, .Release)
 }
 
 assembly_line_put :: proc(line: ^Assembly_Line($T, $S), data: T) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     head := sync.atomic_add_explicit(&line.head, 1, .Relaxed)
     slot := &line.data[head & (S - 1)]
 
@@ -340,6 +359,7 @@ assembly_line_put :: proc(line: ^Assembly_Line($T, $S), data: T) {
 }
 
 assembly_line_get :: proc(line: ^Assembly_Line($T, $S)) -> (T, bool) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     tail := sync.atomic_add_explicit(&line.tail, 1, .Relaxed)
     slot := &line.data[tail & (S - 1)]
 
