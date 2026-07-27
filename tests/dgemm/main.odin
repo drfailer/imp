@@ -55,6 +55,9 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) -> bool {
 
 @(test)
 test :: proc(t: ^testing.T) {
+    prof.init()
+    defer prof.fini()
+
     MATRIX_SIZE :: 512
     TILE_SIZE :: 32
     A, B, C, E: Matrix

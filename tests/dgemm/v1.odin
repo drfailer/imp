@@ -58,7 +58,6 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     TK := data.TK
 
     for {
-        prof.region("product_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.product_state) or_break
 
         prof.region("product_state_compute")
@@ -99,7 +98,6 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     imp.barrier(ctx)
 
     for {
-        prof.region("sum_state_dequeue_compute")
         udata := imp.comms_recv(&data.comms.sum_state) or_break
 
         prof.region("sum_state_compute")
@@ -160,6 +158,7 @@ product_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for {
         tiles := imp.comm_recv(&data.comms.product_task) or_break
+        prof.region("product_task_compute")
         common.dot(tiles.a, tiles.b, tiles.p)
         imp.type_comms_send(&data.comms.sum_state, tiles)
     }
@@ -171,6 +170,7 @@ sum_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for {
         tiles := imp.comm_recv(&data.comms.sum_task) or_break
+        prof.region("sum_task_compute")
         c := tiles.c
         p := tiles.p
 

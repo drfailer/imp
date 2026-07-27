@@ -62,7 +62,7 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
     imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
 
-    imp.pool_init(&data.tile_pools[3], data.TM * data.TN * data.TK,
+    imp.pool_init(&data.tile_pools[3], data.TM * data.TN,
         proc(tile: ^Matrix_Tile, data: rawptr) {
             data := cast(^Dgemm_Data)data
             common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
