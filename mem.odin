@@ -31,7 +31,8 @@ Pool :: struct($T: typeid) {
 pool_init :: proc(pool: ^Pool($T), #any_int capacity: int,
                   elem_init: proc(elem: ^T, data: rawptr) = nil,
                   elem_init_data: rawptr = nil) -> (err: runtime.Allocator_Error) {
-    mem.dynamic_arena_init(&pool.arena)
+    block_size := round_to_power_of_2(capacity * size_of(Pool_Node(T)))
+    mem.dynamic_arena_init(&pool.arena, block_size = block_size)
     allocator := mem.dynamic_arena_allocator(&pool.arena)
 
     pool.elem_init = elem_init
@@ -101,4 +102,14 @@ pool_release :: proc(pool: ^Pool($T), elem: ^T) {
         pool.free_list = node
     }
     sync.signal(&pool.cond)
+}
+
+@(private = "file")
+round_to_power_of_2 :: proc(n: int) -> int {
+    result: int = 1
+    for result < n {
+        result <<= 1
+    }
+    ensure(result > 0)
+    return result
 }
