@@ -1,9 +1,12 @@
 package imp
 
+import "prof"
 import "core:mem"
 import "core:sync"
 import "base:runtime"
 import p "core:container/pool"
+
+MEM_PROFILING_ENABLED :: #config(IMP_MEM_PROFILING_ENABLED, true)
 
 // Pool ////////////////////////////////////////////////////////////////////////
 
@@ -64,6 +67,7 @@ pool_destroy :: proc{
 }
 
 pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, ok: bool){
+    when MEM_PROFILING_ENABLED do prof.procedure()
     sync.guard(&pool.mutex)
     if pool.free_list != nil {
         node := pool.free_list
@@ -75,8 +79,11 @@ pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, 
     case .Fail:
         return nil, false
     case .Wait:
-        for pool.free_list == nil {
-            sync.wait(&pool.cond, &pool.mutex)
+        {
+            when MEM_PROFILING_ENABLED do prof.region("pool_alloc_wait")
+            for pool.free_list == nil {
+                sync.wait(&pool.cond, &pool.mutex)
+            }
         }
         node := pool.free_list
         pool.free_list = node._next
@@ -93,6 +100,7 @@ pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, 
 }
 
 pool_release :: proc(pool: ^Pool($T), elem: ^T) {
+    when MEM_PROFILING_ENABLED do prof.procedure()
     node := cast(^Pool_Node(T))elem
     when ODIN_DEBUG {
         if node._next != node do panic("tried to release an invalid or corrupted element")
