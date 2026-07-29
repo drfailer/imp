@@ -613,12 +613,9 @@ task :: proc(ctx: Ctx, thread_count: int, comms: ^Comms($I), self: $T, exec: pro
             data := type_comms_recv(comms) or_break
             exec(ctx, self, data)
         }
-        thread_continue = false
-    } else {
-        thread_continue = true
+        return false
     }
-    join(ctx)
-    return
+    return true
 }
 
 task_shutdown :: proc(ctx: Ctx, comms: ^Comms($I)) {
