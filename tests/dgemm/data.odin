@@ -5,6 +5,7 @@ import "../../prof"
 import "../common"
 import "core:container/queue"
 import "core:log"
+import "base:runtime"
 
 USE_TILE_POOL :: #config(USE_TILE_POOL, true)
 
@@ -73,7 +74,8 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
             proc(tile: ^Matrix_Tile, data: rawptr) {
                 common.matrix_tile_destroy(tile)
             },
-            data)
+            data,
+            add_allocator = runtime.heap_allocator())
     }
 
     imp.type_comm_init(&data.comm.product_state)
