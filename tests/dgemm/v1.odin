@@ -198,24 +198,24 @@ dgemm_parallel :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     prof.procedure()
     context.logger = data.logger
 
-    local_ctx := imp.get_local_ctx(ctx)
-    if imp.branch(ctx, 10) {
-        if imp.branch(ctx, 4) {
-            if imp.branch(ctx, 1) {
-                product_state(ctx, data)
-            } else {
-                split_task(ctx, data)
+    if imp.branches(ctx).run {
+        if imp.branch(ctx, 10) {
+            if imp.branch(ctx, 4) {
+                if imp.branch(ctx, 1) {
+                    product_state(ctx, data)
+                } else {
+                    split_task(ctx, data)
+                }
+                imp.join(ctx)
             }
             imp.join(ctx)
+            sum_task(ctx, data)
+        } else if imp.branch(ctx, 1) {
+            sum_state(ctx, data)
+        } else {
+            product_task(ctx, data)
         }
-        imp.join(ctx)
-        sum_task(ctx, data)
-    } else if imp.branch(ctx, 1) {
-        sum_state(ctx, data)
-    } else {
-        product_task(ctx, data)
     }
-    imp.join_to(ctx, local_ctx)
 }
 
 dgemm_v1 :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {

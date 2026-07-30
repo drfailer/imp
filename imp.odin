@@ -605,6 +605,19 @@ join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
     }
 }
 
+// fancy auto-join synctax
+
+Branches_Result :: struct { run: bool, local_ctx: ^Local_Ctx }
+
+branches_end :: proc(ctx: Ctx, br: Branches_Result) {
+    join_to(ctx, br.local_ctx)
+}
+
+@(deferred_in_out=branches_end)
+branches :: proc(ctx: Ctx) -> Branches_Result {
+    return Branches_Result{ true, get_local_ctx(ctx) }
+}
+
 // task ////////////////////////////////
 
 task :: proc(ctx: Ctx, thread_count: int, comms: ^Comms($I), self: $T, exec: proc(ctx: Ctx, self: T, input: I)) -> (thread_continue: bool) {
@@ -624,6 +637,7 @@ task_shutdown :: proc(ctx: Ctx, comms: ^Comms($I)) {
     }
 }
 
+tasks :: branches
 task_send :: comms_send
 
 // messages ////////////////////////////
