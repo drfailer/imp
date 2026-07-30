@@ -16,11 +16,15 @@ matrix_init :: proc(m: ^Matrix, id: int, rows, cols: uint, allocator := context.
     m.cols = cols
     m.ld = cols
     m.size = rows * cols
-    m.data = make([^]f64, rows * cols, allocator)
+    // m.data = make([^]f64, rows * cols, allocator)
+    data, err := mem.alloc_bytes_non_zeroed(size_of(f64) * int(rows * cols), allocator = allocator)
+    ensure(err == nil)
+    m.data = cast([^]f64)raw_data(data)
 }
 
 matrix_destroy :: proc(m: ^Matrix) {
-    free(m.data)
+    // free(m.data)
+    mem.free_with_size(m.data, int(m.size))
 }
 
 dot :: #force_inline proc(A, B, C: Matrix) {
@@ -96,7 +100,10 @@ matrix_tile_init_alloc :: proc(tile: ^Matrix_Tile, row_idx, col_idx, rows, cols:
     tile.cols = cols
     tile.ld = cols
     tile.size = rows * cols
-    tile.data = make([^]f64, rows * cols, allocator)
+    // tile.data = make([^]f64, rows * cols, allocator)
+    data, err := mem.alloc_bytes_non_zeroed(size_of(f64) * int(rows * cols), allocator = allocator)
+    ensure(err == nil)
+    tile.data = cast([^]f64)raw_data(data)
 }
 
 matrix_tile_init :: proc{
@@ -105,5 +112,6 @@ matrix_tile_init :: proc{
 }
 
 matrix_tile_destroy :: proc(tile: ^Matrix_Tile) {
-    free(tile.data)
+    // free(tile.data)
+    mem.free_with_size(tile.data, int(tile.size))
 }
