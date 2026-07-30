@@ -6,7 +6,7 @@ import "core:sync"
 import "base:runtime"
 import p "core:container/pool"
 
-MEM_PROFILING_ENABLED :: #config(IMP_MEM_PROFILING_ENABLED, true)
+MEM_PROFILING_ENABLED :: #config(IMP_MEM_PROFILING_ENABLED, false)
 
 // Pool ////////////////////////////////////////////////////////////////////////
 
