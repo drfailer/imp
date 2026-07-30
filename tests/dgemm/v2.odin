@@ -26,15 +26,15 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                                     min(data.tile_rows, m.rows - row),
                                     min(data.tile_cols, m.cols - col))
             switch thread_index {
-            case 0: imp.type_comms_send(&data.comms.product_state, cast(^Tile_A)tile)
-            case 1: imp.type_comms_send(&data.comms.product_state, cast(^Tile_B)tile)
-            case 2: imp.type_comms_send(&data.comms.sum_state, cast(^Tile_C)tile)
+            case 0: imp.type_comm_send(&data.comm.product_state, cast(^Tile_A)tile)
+            case 1: imp.type_comm_send(&data.comm.product_state, cast(^Tile_B)tile)
+            case 2: imp.type_comm_send(&data.comm.sum_state, cast(^Tile_C)tile)
             }
         }
     }
     imp.barrier(ctx)
     if thread_index == 0 {
-        imp.comms_set_closed(&data.comms.product_state)
+        imp.comm_set_closed(&data.comm.product_state)
     }
 }
 
@@ -48,7 +48,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         p.cols = b.rows
         p.row_idx = a.row_idx
         p.col_idx = b.col_idx
-        imp.assembly_line_put(&data.comms.tasks, Product_Data{a, b, p})
+        imp.assembly_line_put(&data.comm.tasks, Product_Data{a, b, p})
     }
 
     TM := data.TM
@@ -57,7 +57,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for {
         prof.region("product_state_dequeue_compute")
-        udata := imp.comms_recv(&data.comms.product_state) or_break
+        udata := imp.comm_recv(&data.comm.product_state) or_break
 
         prof.region("product_state_compute")
         #no_bounds_check switch value in udata {
@@ -94,7 +94,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for {
         prof.region("sum_state_dequeue_compute")
-        udata := imp.comms_recv(&data.comms.sum_state) or_break
+        udata := imp.comm_recv(&data.comm.sum_state) or_break
 
         prof.region("sum_state_compute")
         switch value in udata {
@@ -103,7 +103,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[c.row_idx * TN + c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
-                imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = c, p = p})
+                imp.assembly_line_put(&data.comm.tasks, Sum_Data{c = c, p = p})
             } else {
                 q.c = c
             }
@@ -112,7 +112,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[p.row_idx * TN + p.col_idx]
             if q.c != nil {
-                imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = q.c, p = p})
+                imp.assembly_line_put(&data.comm.tasks, Sum_Data{c = q.c, p = p})
                 q.c = nil
             } else {
                 queue.enqueue(&q.ps, p)
@@ -122,7 +122,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
             q := &data.sum_state.queues[value.c.row_idx * TN + value.c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
-                imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = value.c, p = p})
+                imp.assembly_line_put(&data.comm.tasks, Sum_Data{c = value.c, p = p})
             } else {
                 q.c = value.c
             }
@@ -153,13 +153,13 @@ tasks_process :: proc(data: ^Dgemm_Data, udata: union {Product_Data, Sum_Data}) 
     case Product_Data:
         prof.region("product_task")
         common.dot(tiles.a, tiles.b, tiles.p)
-        imp.type_comms_send(&data.comms.sum_state, cast(^Tile_P)tiles.p)
+        imp.type_comm_send(&data.comm.sum_state, cast(^Tile_P)tiles.p)
     case Sum_Data:
         prof.region("sum_task")
         c := tiles.c
         p := tiles.p
         compute_sum_task(c.data, p.data, c.rows, c.cols, c.ld, p.ld)
-        imp.type_comms_send(&data.comms.sum_state, tiles)
+        imp.type_comm_send(&data.comm.sum_state, tiles)
         // free_tile_with_data(data, 3, tiles.p)
     }
 }
@@ -170,7 +170,7 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for {
         prof.region("tasks_dequeue_compute")
-        udata := imp.assembly_line_get(&data.comms.tasks) or_break
+        udata := imp.assembly_line_get(&data.comm.tasks) or_break
         tasks_process(data, udata)
     }
 }
@@ -181,8 +181,8 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 @(private="file")
 terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     prof.procedure()
-    imp.comms_set_closed(&data.comms.sum_state)
-    imp.assembly_line_set_stop(&data.comms.tasks)
+    imp.comm_set_closed(&data.comm.sum_state)
+    imp.assembly_line_set_stop(&data.comm.tasks)
     when !USE_TILE_POOL {
         for &q in data.sum_state.queues {
             free_tile(data, 2, q.c)

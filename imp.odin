@@ -106,7 +106,7 @@ release_shared_ctx :: proc(ctx: ^Global_Ctx, shared_ctx: ^Shared_Ctx) {
 
 Thread_Ctx :: struct {
     id: int,
-    comms: Comms(Message(Data)),
+    comm: Comm(Message(Data)),
     ctx_stack: [dynamic]Local_Ctx,
     scratch_memory: mem.Scratch,
 }
@@ -116,14 +116,14 @@ thread_ctx_init :: proc(ctx: ^Thread_Ctx, index,
                         scratch_memory_size: int,
                         shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
     ctx.id = index
-    comms_init(&ctx.comms, comm_channel_count, allocator)
+    comm_init(&ctx.comm, comm_channel_count, allocator)
     ctx.ctx_stack = make([dynamic]Local_Ctx, 1, ctx_stack_capacity + 1, allocator)
     ctx.ctx_stack[0] = Local_Ctx{ shared_ctx = shared_ctx, thread_index = index }
     mem.scratch_init(&ctx.scratch_memory, scratch_memory_size, allocator)
 }
 
 thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
-    comms_destroy(&ctx.comms)
+    comm_destroy(&ctx.comm)
     delete(ctx.ctx_stack)
     mem.scratch_destroy(&ctx.scratch_memory)
 }
@@ -620,10 +620,10 @@ branches :: proc(ctx: Ctx) -> Branches_Result {
 
 // task ////////////////////////////////
 
-task :: proc(ctx: Ctx, thread_count: int, comms: ^Comms($I), self: $T, exec: proc(ctx: Ctx, self: T, input: I)) -> (thread_continue: bool) {
+task :: proc(ctx: Ctx, thread_count: int, comm: ^Comm($I), self: $T, exec: proc(ctx: Ctx, self: T, input: I)) -> (thread_continue: bool) {
     if branch(ctx, thread_count) {
         for {
-            data := type_comms_recv(comms) or_break
+            data := type_comm_recv(comm) or_break
             exec(ctx, self, data)
         }
         return false
@@ -631,14 +631,14 @@ task :: proc(ctx: Ctx, thread_count: int, comms: ^Comms($I), self: $T, exec: pro
     return true
 }
 
-task_shutdown :: proc(ctx: Ctx, comms: ^Comms($I)) {
+task_shutdown :: proc(ctx: Ctx, comm: ^Comm($I)) {
     if single(ctx) {
-        comms_set_closed(comms)
+        comm_set_closed(comm)
     }
 }
 
 tasks :: branches
-task_send :: comms_send
+task_send :: comm_send
 
 // messages ////////////////////////////
 
@@ -657,10 +657,10 @@ send_data_parallel_ctx_data :: proc(ctx: Ctx, thread_index: int, data: Data, cha
     shared_ctx := get_local_ctx(ctx).shared_ctx
     if thread_index >= 0 {
         receiver_data := get_thread_ctx_by_local_index(ctx, shared_ctx, thread_index)
-        comms_send(&receiver_data.comms, Message(Data){get_thread_index(ctx), data}, channel)
+        comm_send(&receiver_data.comm, Message(Data){get_thread_index(ctx), data}, channel)
     } else {
         receiver_data := &ctx.global_ctx.thread_ctxs[~thread_index]
-        comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
+        comm_send(&receiver_data.comm, Message(Data){~get_thread_id(ctx), data}, channel)
     }
 }
 
@@ -672,7 +672,7 @@ send_data_shared_ctx_data :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_inde
     assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
     assert(thread_index >= 0)
     receiver_data := get_thread_ctx_by_local_index(ctx, shared_ctx, thread_index)
-    comms_send(&receiver_data.comms, Message(Data){~get_thread_id(ctx), data}, channel)
+    comm_send(&receiver_data.comm, Message(Data){~get_thread_id(ctx), data}, channel)
 }
 
 send_data_shared_ctx_poly :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: ^$T, channel := 0) {
@@ -687,7 +687,7 @@ send_data :: proc{
 }
 
 recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    msg, ok := comms_recv(&ctx.thread_ctx.comms, channel)
+    msg, ok := comm_recv(&ctx.thread_ctx.comm, channel)
     return msg.content, msg.sender_index, ok
 }
 
@@ -701,7 +701,7 @@ recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int
 recv_data :: proc{ recv_data_data, recv_data_poly }
 
 try_recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    msg, ok := comms_try_recv(&ctx.thread_ctx.comms, channel)
+    msg, ok := comm_try_recv(&ctx.thread_ctx.comm, channel)
     return msg.content, msg.sender_index, ok
 }
 

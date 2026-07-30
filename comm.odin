@@ -17,33 +17,48 @@ Message :: struct($T: typeid) {
 
 // Comm ////////////////////////////////////////////////////////////////////////
 
+ANY_CHANNEL :: -1
+
 Comm :: struct($T: typeid) #align(64) {
-    closed:  bool,
-    waiters: i32,
-    queue:   Lock_Queue(T),
-    cond:    sync.Cond,
-    mutex:   sync.Mutex,
+    closed:   bool,
+    waiters:  i32,
+    channels: [dynamic]Lock_Queue(T),
+    mutex:    sync.Mutex,
+    cond:     sync.Cond,
 }
 
-comm_init :: proc(comm: ^Comm($T), allocator := context.allocator) {
-    queue_init(&comm.queue, allocator)
+comm_init :: proc(comm: ^Comm($T), channel_count := 1, allocator := context.allocator) {
+    comm.channels = make([dynamic]Lock_Queue(T), channel_count, allocator)
+    for &channel in comm.channels {
+        queue_init(&channel, allocator)
+    }
+}
+
+type_comm_init :: proc(comm: ^Comm($U), allocator := context.allocator) {
+    when intrinsics.type_is_union(U) {
+        comm_init(comm, intrinsics.type_union_variant_count(U), allocator)
+    } else {
+        comm_init(comm, 1, allocator)
+    }
 }
 
 comm_destroy :: proc(comm: ^Comm($T)) {
-    queue_destroy(&comm.queue)
+    for &channel in comm.channels {
+        queue_destroy(&channel)
+    }
+    delete(comm.channels)
 }
 
 comm_set_closed :: proc(comm: ^Comm($T), closed := true) {
     when COMM_PROFILING_ENABLED do prof.procedure()
     intrinsics.atomic_store_explicit(&comm.closed, closed, .Release)
     if intrinsics.atomic_load_explicit(&comm.waiters, .Acquire) > 0 {
-        sync.lock(&comm.mutex)
+        sync.guard(&comm.mutex)
         sync.broadcast(&comm.cond)
-        sync.unlock(&comm.mutex)
     }
 }
 
-comm_closed :: proc(comm: ^Comm($T)) -> bool {
+comm_is_closed :: proc(comm: ^Comm($T)) -> bool {
     return intrinsics.atomic_load_explicit(&comm.closed, .Acquire)
 }
 
@@ -59,187 +74,100 @@ comm_wait_open :: proc(comm: ^Comm($T)) {
     }
 }
 
-comm_send :: proc(comm: ^Comm($T), data: T) {
+comm_send :: proc(comm: ^Comm($T), data: T, channel := 0) {
     when COMM_PROFILING_ENABLED do prof.procedure()
-    queue_push(&comm.queue, data)
-    if intrinsics.atomic_load_explicit(&comm.waiters, .Acquire) > 0 {
-        sync.guard(&comm.mutex) // signal under lock to prevent lost wakeups
+    queue_push(&comm.channels[channel], data)
+    if intrinsics.atomic_load(&comm.waiters) > 0 {
+        sync.guard(&comm.mutex)
         sync.signal(&comm.cond)
     }
 }
 
-comm_recv :: proc(comm: ^Comm($T)) -> (data: T, ok: bool) {
-    when COMM_PROFILING_ENABLED do prof.region("comm_recv")
-    if data, ok = queue_pop(&comm.queue); ok do return data, true
+type_comm_send :: proc(comm: ^Comm($U), data: $T) {
+    when intrinsics.type_is_union(U) {
+        comm_send(comm, data, intrinsics.type_variant_index_of(U, T))
+    } else {
+        comm_send(comm, data, 0)
+    }
+}
+
+comm_recv :: proc(comm: ^Comm($T), channel := ANY_CHANNEL, thread_index := 0) -> (data: T, received: bool) {
+    channel_count := len(comm.channels)
+    channel := channel if channel_count > 1 else 0
+    if channel != ANY_CHANNEL {
+        when COMM_PROFILING_ENABLED do prof.region("comm_recv")
+        if data, ok := queue_pop(&comm.channels[channel]); ok do return data, true
+    } else {
+        when COMM_PROFILING_ENABLED do prof.region("comm_recv")
+        start_idx := thread_index % channel_count
+        for i in 0..<channel_count {
+            idx := (start_idx + i) % channel_count
+            if data, ok := queue_pop(&comm.channels[idx]); ok do return data, true
+        }
+    }
     if intrinsics.atomic_load_explicit(&comm.closed, .Acquire) do return data, false
-    return comm_recv_wait(&comm.queue, &comm.closed, &comm.waiters, &comm.mutex, &comm.cond)
+
+    return comm_recv_wait(comm, channel, thread_index)
 }
 
 @(private)
-comm_recv_wait :: proc(
-    queue: ^Lock_Queue($T),
-    closed: ^bool,
-    waiters: ^i32,
-    mutex: ^sync.Mutex,
-    cond: ^sync.Cond,
-) -> (data: T, ok: bool) {
-    intrinsics.atomic_add_explicit(waiters, 1, .Release)
-    defer intrinsics.atomic_sub_explicit(waiters, 1, .Release)
-    if sync.guard(mutex) {
+comm_recv_wait :: proc(comm: ^Comm($T), channel, thread_index: int) -> (data: T, ok: bool) {
+    channel_count := len(comm.channels)
+    intrinsics.atomic_add_explicit(&comm.waiters, 1, .Release)
+    defer intrinsics.atomic_sub_explicit(&comm.waiters, 1, .Release)
+    if sync.guard(&comm.mutex) {
         for {
             when COMM_PROFILING_ENABLED do prof.region("comm_recv_wait")
-            if data, ok = queue_pop(queue); ok do return data, true
-            if intrinsics.atomic_load_explicit(closed, .Acquire) do return data, false
-            sync.wait(cond, mutex)
-        }
-    }
-    return data, false
-}
-
-comm_try_recv :: proc(comm: ^Comm($T)) -> (data: T, received: bool) {
-    when COMM_PROFILING_ENABLED do prof.procedure()
-    return queue_pop(&comm.queue)
-}
-
-
-// Core utilities //////////////////////////////////////////////////////////////
-
-ANY_CHANNEL :: -1
-
-Comms :: struct($T: typeid) #align(64) {
-    closed:   bool,
-    waiters:  i32,
-    channels: [dynamic]Comm(T),
-    mutex:    sync.Mutex,
-    cond:     sync.Cond,
-}
-
-comms_init :: proc(comms: ^Comms($T), channel_count: int, allocator := context.allocator) {
-    comms.channels = make([dynamic]Comm(T), channel_count, allocator)
-    for &channel in comms.channels {
-        comm_init(&channel, allocator)
-    }
-}
-
-type_comms_init :: proc(comms: ^Comms($U), allocator := context.allocator) where intrinsics.type_is_union(U) {
-    comms_init(comms, intrinsics.type_union_variant_count(U), allocator)
-}
-
-comms_destroy :: proc(comms: ^Comms($T)) {
-    for &channel in comms.channels {
-        comm_destroy(&channel)
-    }
-    delete(comms.channels)
-}
-
-comms_set_closed :: proc(comms: ^Comms($T), closed := true) {
-    when COMM_PROFILING_ENABLED do prof.procedure()
-    for &channel in comms.channels {
-        comm_set_closed(&channel, closed)
-    }
-    intrinsics.atomic_store_explicit(&comms.closed, closed, .Release)
-    if intrinsics.atomic_load_explicit(&comms.waiters, .Acquire) > 0 {
-        sync.guard(&comms.mutex)
-        sync.broadcast(&comms.cond)
-    }
-}
-
-comms_is_closed :: proc(comms: ^Comms($T)) -> bool {
-    return intrinsics.atomic_load_explicit(&comms.closed, .Acquire)
-}
-
-comms_wait_open :: proc(comms: ^Comms($T)) {
-    when COMM_PROFILING_ENABLED do prof.procedure()
-    if intrinsics.atomic_load_explicit(&comms.closed, .Acquire) do return
-    if sync.guard(&comms.mutex) {
-        intrinsics.atomic_add_explicit(&comms.waiters, 1, .Release)
-        for intrinsics.atomic_load_explicit(&comms.closed, .Acquire) {
-            sync.wait(&comms.cond, &comms.mutex)
-        }
-        intrinsics.atomic_sub_explicit(&comms.waiters, 1, .Release)
-    }
-}
-
-comms_send :: proc(comms: ^Comms($T), data: T, channel := 0) {
-    when COMM_PROFILING_ENABLED do prof.procedure()
-    comm_send(&comms.channels[channel], data)
-    // this is for global waiters
-    if intrinsics.atomic_load(&comms.waiters) > 0 {
-        sync.guard(&comms.mutex)
-        sync.signal(&comms.cond)
-    }
-}
-
-type_comms_send :: proc(comms: ^Comms($U), data: $T) where intrinsics.type_is_union(U) {
-    comms_send(comms, data, intrinsics.type_variant_index_of(U, T))
-}
-
-comms_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0) -> (data: T, received: bool) {
-    if channel != ANY_CHANNEL {
-        when COMM_PROFILING_ENABLED do prof.region("comms_recv")
-        return comm_recv(&comms.channels[channel])
-    }
-
-    channel_count := len(comms.channels)
-    when COMM_PROFILING_ENABLED do prof.region("comms_recv")
-    start_idx := thread_index % channel_count
-    for i in 0..<channel_count {
-        idx := (start_idx + i) % channel_count
-        if data, ok := comm_try_recv(&comms.channels[idx]); ok {
-            return data, true
-        }
-    }
-    if intrinsics.atomic_load_explicit(&comms.closed, .Acquire) do return data, false
-
-    return comms_recv_wait(comms, thread_index)
-}
-
-@(private)
-comms_recv_wait :: proc(comms: ^Comms($T), thread_index: int) -> (data: T, ok: bool) {
-    channel_count := len(comms.channels)
-    intrinsics.atomic_add_explicit(&comms.waiters, 1, .Release)
-    defer intrinsics.atomic_sub_explicit(&comms.waiters, 1, .Release)
-    if sync.guard(&comms.mutex) {
-        for {
-            when COMM_PROFILING_ENABLED do prof.region("comms_recv_wait")
-            start_idx := thread_index % channel_count
-            for i in 0..<channel_count {
-                idx := (start_idx + i) % channel_count
-                if data, ok = comm_try_recv(&comms.channels[idx]); ok do return data, true
+            if channel != ANY_CHANNEL {
+                if data, ok = queue_pop(&comm.channels[channel]); ok do return data, true
+            } else {
+                start_idx := thread_index % channel_count
+                for i in 0..<channel_count {
+                    idx := (start_idx + i) % channel_count
+                    if data, ok = queue_pop(&comm.channels[idx]); ok do return data, true
+                }
             }
-            if intrinsics.atomic_load_explicit(&comms.closed, .Acquire) do return data, false
-            sync.wait(&comms.cond, &comms.mutex)
+            if intrinsics.atomic_load_explicit(&comm.closed, .Acquire) do return data, false
+            sync.wait(&comm.cond, &comm.mutex)
         }
     }
     return data, false
 }
 
-type_comms_recv :: proc(comms: ^Comms($U), $T: typeid) -> (data: T, received: bool)
-    where intrinsics.type_is_union(U) {
-    udata := comms_recv(comms, intrinsics.type_variant_index_of(U, T)) or_return
-    return udata.(T), true
+type_comm_recv :: proc(comm: ^Comm($U), $T: typeid) -> (data: T, received: bool) {
+    when intrinsics.type_is_union(U) {
+        udata := comm_recv(comm, intrinsics.type_variant_index_of(U, T)) or_return
+        return udata.(T), true
+    } else {
+        udata := comm_recv(comm, 0) or_return
+        return udata.(T), true
+    }
 }
 
-comms_try_recv :: proc(comms: ^Comms($T), channel := ANY_CHANNEL, thread_index := 0) -> (data: T, received: bool) {
+comm_try_recv :: proc(comm: ^Comm($T), channel := ANY_CHANNEL, thread_index := 0) -> (data: T, received: bool) {
+    when COMM_PROFILING_ENABLED do prof.procedure()
     if channel != ANY_CHANNEL {
-        return comm_try_recv(&comms.channels[channel])
+        return queue_pop(&comm.channels[channel])
     }
-    channel_count := len(comms.channels)
+    channel_count := len(comm.channels)
     start_idx := thread_index % channel_count
     for i in 0..<channel_count {
         idx := (start_idx + i) % channel_count
-        if data, ok := comm_try_recv(&comms.channels[idx]); ok {
+        if data, ok := queue_pop(&comm.channels[idx]); ok {
             return data, true
         }
     }
     return {}, false
 }
 
-type_comms_try_recv :: proc(comms: ^Comms($U), $T: typeid) -> (data: T, received: bool)
-    where intrinsics.type_is_union(U) {
-    when COMM_PROFILING_ENABLED do prof.procedure()
-    udata := comms_try_recv(comms, intrinsics.type_variant_index_of(U, T)) or_return
-    return udata.(T), true
+type_comm_try_recv :: proc(comm: ^Comm($U), $T: typeid) -> (data: T, received: bool) {
+    when intrinsics.type_is_union(U) {
+        udata := comm_try_recv(comm, intrinsics.type_variant_index_of(U, T)) or_return
+        return udata.(T), true
+    } else {
+        udata := comm_try_recv(comm, 0) or_return
+        return udata.(T), true
+    }
 }
 
 // assembly line ///////////////////////////////////////////////////////////////

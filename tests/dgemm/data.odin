@@ -42,9 +42,9 @@ Dgemm_Data :: struct {
         queues: [dynamic]Sum_Queue,
         progress_counter: uint,
     },
-    comms: struct {
-        product_state: imp.Comms(union { ^Tile_A, ^Tile_B }),
-        sum_state: imp.Comms(union { Sum_Data, ^Tile_P, ^Tile_C }),
+    comm: struct {
+        product_state: imp.Comm(union { ^Tile_A, ^Tile_B }),
+        sum_state: imp.Comm(union { Sum_Data, ^Tile_P, ^Tile_C }),
         product_task: imp.Comm(Product_Data),
         sum_task: imp.Comm(Sum_Data),
         tasks: imp.Assembly_Line(union { Product_Data, Sum_Data }, 1024),
@@ -73,12 +73,12 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
             }, data)
     }
 
-    imp.type_comms_init(&data.comms.product_state)
-    imp.type_comms_init(&data.comms.sum_state)
-    imp.comm_init(&data.comms.product_task)
-    imp.comm_init(&data.comms.sum_task)
+    imp.type_comm_init(&data.comm.product_state)
+    imp.type_comm_init(&data.comm.sum_state)
+    imp.comm_init(&data.comm.product_task)
+    imp.comm_init(&data.comm.sum_task)
 
-    imp.assembly_line_init(&data.comms.tasks)
+    imp.assembly_line_init(&data.comm.tasks)
 
     data.product_state.a_tiles = make([dynamic]^Matrix_Tile, data.TM * data.TK)
     data.product_state.b_tiles = make([dynamic]^Matrix_Tile, data.TK * data.TN)
@@ -97,10 +97,10 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
             common.matrix_tile_destroy(tile)
         })
     }
-    imp.comms_destroy(&data.comms.product_state)
-    imp.comms_destroy(&data.comms.sum_state)
-    imp.comm_destroy(&data.comms.product_task)
-    imp.comm_destroy(&data.comms.sum_task)
+    imp.comm_destroy(&data.comm.product_state)
+    imp.comm_destroy(&data.comm.sum_state)
+    imp.comm_destroy(&data.comm.product_task)
+    imp.comm_destroy(&data.comm.sum_task)
 
     log.destroy_console_logger(data.logger)
 
