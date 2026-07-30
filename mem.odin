@@ -28,42 +28,38 @@ Pool :: struct($T: typeid) {
     mutex: sync.Mutex,
     cond: sync.Cond,
     elem_init: proc(elem: ^T, data: rawptr),
-    elem_init_data: rawptr,
+    elem_fini: proc(elem: ^T, data: rawptr),
+    user_data: rawptr,
 }
 
 pool_init :: proc(pool: ^Pool($T), #any_int capacity: int,
                   elem_init: proc(elem: ^T, data: rawptr) = nil,
-                  elem_init_data: rawptr = nil) -> (err: runtime.Allocator_Error) {
+                  elem_fini: proc(elem: ^T, data: rawptr) = nil,
+                  user_data: rawptr = nil) -> (err: runtime.Allocator_Error) {
     block_size := round_to_power_of_2(capacity * size_of(Pool_Node(T)))
     mem.dynamic_arena_init(&pool.arena, block_size = block_size)
     allocator := mem.dynamic_arena_allocator(&pool.arena)
 
     pool.elem_init = elem_init
-    pool.elem_init_data = elem_init_data
+    pool.elem_fini = elem_fini
+    pool.user_data = user_data
 
     for _ in 0..<capacity {
         node := new(Pool_Node(T), allocator)
-        if elem_init != nil do elem_init(node, elem_init_data)
+        if elem_init != nil do elem_init(node, user_data)
         node._next = pool.free_list
         pool.free_list = node
     }
     return
 }
 
-pool_destroy_simple :: proc(pool: ^Pool($T)) {
+pool_destroy :: proc(pool: ^Pool($T)) {
     mem.dynamic_arena_destroy(&pool.arena)
-}
-
-pool_destroy_with_item_destroy :: proc(pool: ^Pool($T), item_destroy: proc(item: ^T, data: rawptr), data: rawptr = nil) {
-    for node := pool.free_list; node != nil; node = node._next {
-        item_destroy(node, data)
+    if pool.elem_fini != nil {
+        for node := pool.free_list; node != nil; node = node._next {
+            pool.elem_fini(node, pool.user_data)
+        }
     }
-    mem.dynamic_arena_destroy(&pool.arena)
-}
-
-pool_destroy :: proc{
-    pool_destroy_simple,
-    pool_destroy_with_item_destroy,
 }
 
 pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, ok: bool){
@@ -92,7 +88,7 @@ pool_alloc :: proc(pool: ^Pool($T), mode := Pool_Alloc_Mode.Fail) -> (data: ^T, 
     case .Grow:
         allocator := mem.dynamic_arena_allocator(&pool.arena)
         node := new(Pool_Node(T), allocator)
-        if pool.elem_init != nil do pool.elem_init(node, pool.elem_init_data)
+        if pool.elem_init != nil do pool.elem_init(node, pool.user_data)
         node._next = node
         return node, true
     }

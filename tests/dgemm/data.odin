@@ -6,7 +6,7 @@ import "../common"
 import "core:container/queue"
 import "core:log"
 
-USE_TILE_POOL :: #config(USE_TILE_POOL, false)
+USE_TILE_POOL :: #config(USE_TILE_POOL, true)
 
 Matrix :: common.Matrix
 Matrix_Tile :: common.Matrix_Tile
@@ -65,12 +65,15 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
         imp.pool_init(&data.tile_pools[0], data.TM * data.TK)
         imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
         imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
-
         imp.pool_init(&data.tile_pools[3], data.TM * data.TN,
             proc(tile: ^Matrix_Tile, data: rawptr) {
                 data := cast(^Dgemm_Data)data
                 common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
-            }, data)
+            },
+            proc(tile: ^Matrix_Tile, data: rawptr) {
+                common.matrix_tile_destroy(tile)
+            },
+            data)
     }
 
     imp.type_comm_init(&data.comm.product_state)
@@ -93,9 +96,7 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
         imp.pool_destroy(&data.tile_pools[0])
         imp.pool_destroy(&data.tile_pools[1])
         imp.pool_destroy(&data.tile_pools[2])
-        imp.pool_destroy_with_item_destroy(&data.tile_pools[3], proc(tile: ^Matrix_Tile, data: rawptr) {
-            common.matrix_tile_destroy(tile)
-        })
+        imp.pool_destroy(&data.tile_pools[3])
     }
     imp.comm_destroy(&data.comm.product_state)
     imp.comm_destroy(&data.comm.sum_state)
