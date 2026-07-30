@@ -54,17 +54,22 @@ Profiler :: struct {}
 
 when ENABLED {
 
-init :: proc() {
+@(init)
+init :: proc "contextless" () {
+    context = runtime.default_context()
     time.stopwatch_start(&GLOBAL_STOPWATCH)
     PROFILERS = make([dynamic]^Profiler)
 }
 
-fini :: proc() {
+@(fini)
+fini :: proc "contextless" () {
+    context = runtime.default_context()
     clear()
     delete(PROFILERS)
 }
 
-clear :: proc() {
+clear :: proc "contextless" () {
+    context = runtime.default_context()
     for profiler in PROFILERS {
         vmem.arena_destroy(&profiler.arena)
         free(profiler)
@@ -100,7 +105,8 @@ build_path_up_to_root :: proc(entry: ^Profile_Entry, acc: ^[dynamic]u8) {
     append(acc, entry.name)
 }
 
-get_profiler :: proc() -> ^Profiler {
+get_profiler :: proc "contextless" () -> ^Profiler {
+    context = runtime.default_context()
     if PROFILER == nil {
         PROFILER = new(Profiler)
 

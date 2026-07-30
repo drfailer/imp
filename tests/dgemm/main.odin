@@ -55,9 +55,6 @@ commpare_matrices :: proc(R, E: Matrix, precision := 1e-8) -> bool {
 
 @(test)
 test :: proc(t: ^testing.T) {
-    prof.init()
-    defer prof.fini()
-
     MATRIX_SIZE :: 512
     TILE_SIZE :: 32
     A, B, C, E: Matrix
@@ -88,12 +85,6 @@ test :: proc(t: ^testing.T) {
 }
 
 main :: proc() {
-    prof.init()
-    defer {
-        prof.print_report_to_file("dgemm.dot", .Dot)
-        prof.fini()
-    }
-
     MATRIX_SIZE :: 20000
     TILE_SIZE :: 2048
     A, B, C, E: Matrix
@@ -126,6 +117,7 @@ main :: proc() {
 
 
     prof.report({"dgemm"})
+    prof.print_report_to_file("dgemm.dot", .Dot)
 
     if  MATRIX_SIZE < 16 {
         common.matrix_print(A, "A")
