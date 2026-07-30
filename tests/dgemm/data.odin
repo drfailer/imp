@@ -6,12 +6,15 @@ import "../common"
 import "core:container/queue"
 import "core:log"
 
+USE_TILE_POOL :: #config(USE_TILE_POOL, false)
+
 Matrix :: common.Matrix
 Matrix_Tile :: common.Matrix_Tile
 
 Tile_A :: distinct Matrix_Tile
 Tile_B :: distinct Matrix_Tile
 Tile_C :: distinct Matrix_Tile
+Tile_P :: distinct Matrix_Tile
 Product_Data :: struct {
     a, b, p: ^Matrix_Tile,
 }
@@ -41,7 +44,7 @@ Dgemm_Data :: struct {
     },
     comms: struct {
         product_state: imp.Comms(union { ^Tile_A, ^Tile_B }),
-        sum_state: imp.Comms(union { ^Tile_C, Product_Data, Sum_Data }),
+        sum_state: imp.Comms(union { Sum_Data, ^Tile_P, ^Tile_C }),
         product_task: imp.Comm(Product_Data),
         sum_task: imp.Comm(Sum_Data),
         tasks: imp.Assembly_Line(union { Product_Data, Sum_Data }, 1024),
@@ -58,15 +61,17 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     data.C = C
     data.tile_cols = tile_cols
     data.tile_rows = tile_rows
-    imp.pool_init(&data.tile_pools[0], data.TM * data.TK)
-    imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
-    imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
+    when USE_TILE_POOL {
+        imp.pool_init(&data.tile_pools[0], data.TM * data.TK)
+        imp.pool_init(&data.tile_pools[1], data.TK * data.TN)
+        imp.pool_init(&data.tile_pools[2], data.TM * data.TN)
 
-    imp.pool_init(&data.tile_pools[3], data.TM * data.TN,
-        proc(tile: ^Matrix_Tile, data: rawptr) {
-            data := cast(^Dgemm_Data)data
-            common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
-        }, data)
+        imp.pool_init(&data.tile_pools[3], data.TM * data.TN,
+            proc(tile: ^Matrix_Tile, data: rawptr) {
+                data := cast(^Dgemm_Data)data
+                common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
+            }, data)
+    }
 
     imp.type_comms_init(&data.comms.product_state)
     imp.type_comms_init(&data.comms.sum_state)
@@ -78,15 +83,20 @@ dgemm_data_init :: proc(data: ^Dgemm_Data, A, B, C: Matrix, tile_cols, tile_rows
     data.product_state.a_tiles = make([dynamic]^Matrix_Tile, data.TM * data.TK)
     data.product_state.b_tiles = make([dynamic]^Matrix_Tile, data.TK * data.TN)
     data.sum_state.queues = make([dynamic]Sum_Queue, data.TM * data.TN)
+    for &q in data.sum_state.queues {
+        queue.init(&q.ps, int(data.TK))
+    }
 }
 
 dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
-    imp.pool_destroy(&data.tile_pools[0])
-    imp.pool_destroy(&data.tile_pools[1])
-    imp.pool_destroy(&data.tile_pools[2])
-    imp.pool_destroy_with_item_destroy(&data.tile_pools[3], proc(tile: ^Matrix_Tile, data: rawptr) {
-        common.matrix_tile_destroy(tile)
-    })
+    when USE_TILE_POOL {
+        imp.pool_destroy(&data.tile_pools[0])
+        imp.pool_destroy(&data.tile_pools[1])
+        imp.pool_destroy(&data.tile_pools[2])
+        imp.pool_destroy_with_item_destroy(&data.tile_pools[3], proc(tile: ^Matrix_Tile, data: rawptr) {
+            common.matrix_tile_destroy(tile)
+        })
+    }
     imp.comms_destroy(&data.comms.product_state)
     imp.comms_destroy(&data.comms.sum_state)
     imp.comm_destroy(&data.comms.product_task)
@@ -100,4 +110,49 @@ dgemm_data_destroy :: proc(data: ^Dgemm_Data) {
     delete(data.sum_state.queues)
     delete(data.product_state.a_tiles)
     delete(data.product_state.b_tiles)
+}
+
+when USE_TILE_POOL {
+
+alloc_tile_with_data :: proc(data: ^Dgemm_Data, index: int) -> ^Matrix_Tile {
+    tile, ok := imp.pool_alloc(&data.tile_pools[index], .Wait)
+    assert(ok)
+    return tile
+}
+
+alloc_tile :: proc(data: ^Dgemm_Data, index: int) -> ^Matrix_Tile {
+    tile, ok := imp.pool_alloc(&data.tile_pools[index])
+    assert(ok)
+    return tile
+}
+
+free_tile :: proc(data: ^Dgemm_Data, index: int, tile: ^Matrix_Tile, loc := #caller_location) {
+    imp.pool_release(&data.tile_pools[index], tile, loc = loc)
+}
+
+free_tile_with_data :: proc(data: ^Dgemm_Data, index: int, tile: ^Matrix_Tile, loc := #caller_location) {
+    imp.pool_release(&data.tile_pools[index], tile, loc = loc)
+}
+
+} else {
+
+alloc_tile_with_data :: proc(data: ^Dgemm_Data, index: int) -> ^Matrix_Tile {
+    tile := new(Matrix_Tile)
+    common.matrix_tile_init_alloc(tile, 0, 0, data.tile_cols, data.tile_rows)
+    return tile
+}
+
+alloc_tile :: proc(data: ^Dgemm_Data, index: int, loc := #caller_location) -> ^Matrix_Tile {
+    return new(Matrix_Tile, loc = loc)
+}
+
+free_tile :: proc(data: ^Dgemm_Data, index: int, tile: ^Matrix_Tile) {
+    free(tile)
+}
+
+free_tile_with_data :: proc(data: ^Dgemm_Data, index: int, tile: ^Matrix_Tile) {
+    free(tile.data)
+    free(tile)
+}
+
 }

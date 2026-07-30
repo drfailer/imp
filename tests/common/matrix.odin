@@ -23,15 +23,9 @@ matrix_destroy :: proc(m: ^Matrix) {
     free(m.data)
 }
 
-dot :: proc(A, B, C: Matrix) {
-    assert(C.rows == A.rows)
-    assert(C.cols == B.rows)
-    assert(A.cols == B.rows)
-    M := C.rows
-    N := C.cols
-    K := A.cols
-    cblas.dgemm(.NoTrans, .NoTrans, M, N, K, 1.0, A.data, A.ld, B.data, B.ld, 0,
-                C.data, C.ld)
+dot :: #force_inline proc(A, B, C: Matrix) {
+    cblas.dgemm(.NoTrans, .NoTrans, C.rows, C.cols, A.cols, 1.0, A.data, A.ld,
+                B.data, B.ld, 0, C.data, C.ld)
 }
 
 Matrix_Build_Kind :: enum { Zero, Int, Float }

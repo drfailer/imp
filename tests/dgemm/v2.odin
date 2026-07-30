@@ -21,8 +21,7 @@ split_task :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 
     for row : uint = 0; row < m.rows; row += data.tile_rows {
         for col : uint = 0; col < m.cols; col += data.tile_cols {
-            tile, ok := imp.pool_alloc(&data.tile_pools[thread_index])
-            assert(ok)
+            tile := alloc_tile(data, thread_index)
             common.matrix_tile_init(tile, m, row, col, row / data.tile_rows, col / data.tile_cols,
                                     min(data.tile_rows, m.rows - row),
                                     min(data.tile_cols, m.cols - col))
@@ -44,8 +43,7 @@ product_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     prof.procedure()
 
     product := proc(ctx: imp.Ctx, data: ^Dgemm_Data, a, b: ^Matrix_Tile) {
-        p, ok := imp.pool_alloc(&data.tile_pools[3], .Wait)
-        assert(ok)
+        p := alloc_tile_with_data(data, 3)
         p.rows = a.rows
         p.cols = b.rows
         p.row_idx = a.row_idx
@@ -92,11 +90,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
     TM := data.TM
     TN := data.TN
     TK := data.TK
-
-    if imp.single(ctx) {
-        data.sum_state.progress_counter = TM * TN * TK
-    }
-    imp.barrier(ctx)
+    data.sum_state.progress_counter = TM * TN * TK
 
     for {
         prof.region("sum_state_dequeue_compute")
@@ -107,21 +101,14 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
         case ^Tile_C:
             c := cast(^Matrix_Tile)value
 
-            log.debugf("sum_state: C[{},{}]", c.row_idx, c.col_idx)
-
             q := &data.sum_state.queues[c.row_idx * TN + c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
                 imp.assembly_line_put(&data.comms.tasks, Sum_Data{c = c, p = p})
             } else {
                 q.c = c
             }
-        case Product_Data:
-            p := value.p
-
-            log.debugf("sum_state: Product_Data(A[{},{}], B[{},{}], P[{},{}])",
-                value.a.row_idx, value.a.col_idx,
-                value.b.row_idx, value.b.col_idx,
-                value.p.row_idx, value.p.col_idx)
+        case ^Tile_P:
+            p := cast(^Matrix_Tile)value
 
             q := &data.sum_state.queues[p.row_idx * TN + p.col_idx]
             if q.c != nil {
@@ -131,18 +118,7 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
                 queue.enqueue(&q.ps, p)
             }
         case Sum_Data:
-            log.debugf("sum_state: Sum_Data(P[{},{}], C[{},{}]) (progress = {})",
-                value.p.row_idx, value.p.col_idx,
-                value.c.row_idx, value.c.col_idx,
-                data.sum_state.progress_counter - 1)
-
-            imp.pool_release(&data.tile_pools[3], value.p)
-
-            data.sum_state.progress_counter -= 1
-            if data.sum_state.progress_counter == 0 {
-                terminate(ctx, data)
-                return
-            }
+            free_tile_with_data(data, 3, value.p)
 
             q := &data.sum_state.queues[value.c.row_idx * TN + value.c.col_idx]
             if p, ok := queue.pop_front_safe(&q.ps); ok {
@@ -150,6 +126,23 @@ sum_state :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
             } else {
                 q.c = value.c
             }
+
+            data.sum_state.progress_counter -= 1
+            if data.sum_state.progress_counter == 0 {
+                terminate(ctx, data)
+                return
+            }
+        }
+    }
+}
+
+@(private="file")
+compute_sum_task :: #force_inline proc(#no_alias c_ptr: [^]f64, #no_alias p_ptr: [^]f64, rows, cols, c_ld, p_ld: uint) {
+    #no_bounds_check for row in 0..<rows {
+        cr := c_ptr[row * c_ld:]
+        pr := p_ptr[row * p_ld:]
+        for col in 0..<cols {
+            cr[col] += pr[col]
         }
     }
 }
@@ -160,26 +153,14 @@ tasks_process :: proc(data: ^Dgemm_Data, udata: union {Product_Data, Sum_Data}) 
     case Product_Data:
         prof.region("product_task")
         common.dot(tiles.a, tiles.b, tiles.p)
-        imp.type_comms_send(&data.comms.sum_state, tiles)
+        imp.type_comms_send(&data.comms.sum_state, cast(^Tile_P)tiles.p)
     case Sum_Data:
         prof.region("sum_task")
         c := tiles.c
         p := tiles.p
-
-        c_ptr := c.data
-        p_ptr := p.data
-        c_ld := c.ld
-        p_ld := p.ld
-        rows := tiles.c.rows
-        cols := tiles.c.cols
-        #no_bounds_check for row in 0..<rows {
-            cr := c_ptr[row * c_ld:]
-            pr := p_ptr[row * p_ld:]
-            for col in 0..<cols {
-                cr[col] += pr[col]
-            }
-        }
+        compute_sum_task(c.data, p.data, c.rows, c.cols, c.ld, p.ld)
         imp.type_comms_send(&data.comms.sum_state, tiles)
+        // free_tile_with_data(data, 3, tiles.p)
     }
 }
 
@@ -199,8 +180,20 @@ tasks :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
 //
 @(private="file")
 terminate :: proc(ctx: imp.Ctx, data: ^Dgemm_Data) {
+    prof.procedure()
     imp.comms_set_closed(&data.comms.sum_state)
     imp.assembly_line_set_stop(&data.comms.tasks)
+    when !USE_TILE_POOL {
+        for &q in data.sum_state.queues {
+            free_tile(data, 2, q.c)
+        }
+        for a in data.product_state.a_tiles {
+            free_tile(data, 0, a)
+        }
+        for b in data.product_state.b_tiles {
+            free_tile(data, 1, b)
+        }
+    }
 }
 
 @(private="file")
