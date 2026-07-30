@@ -24,6 +24,7 @@ PROFILERS: [dynamic]^Profiler
 PROFILERS_MUTEX: sync.Mutex
 
 @(thread_local) PROFILER: ^Profiler
+@(thread_local) PROFILING_OFF: bool
 
 Profiler :: struct {
     index: int,
@@ -64,17 +65,10 @@ init :: proc "contextless" () {
 @(fini)
 fini :: proc "contextless" () {
     context = runtime.default_context()
-    clear()
-    delete(PROFILERS)
-}
-
-clear :: proc "contextless" () {
-    context = runtime.default_context()
     for profiler in PROFILERS {
         vmem.arena_destroy(&profiler.arena)
         free(profiler)
     }
-    clear_dynamic_array(&PROFILERS)
 }
 
 reset :: proc() {
@@ -86,6 +80,9 @@ new_thread :: proc(parent_path: string) {
     profiler := get_profiler()
     profiler.root.name = parent_path
 }
+
+enable :: proc() { PROFILING_OFF = false }
+disable :: proc() { PROFILING_OFF = true }
 
 get_parent_path :: proc() -> string {
     profiler := get_profiler()
@@ -134,6 +131,8 @@ fini :: proc() {}
 clear :: proc() {}
 reset :: proc() {}
 new_thread :: proc(parent_profiler: ^Profiler) {}
+enable :: proc() {}
+disable :: proc() {}
 get_profiler :: proc() -> ^Profiler { return nil }
 
 }
@@ -147,6 +146,7 @@ get_profiler :: proc() -> ^Profiler { return nil }
 when ENABLED {
 
 region_begin :: proc(name: string) {
+    if PROFILING_OFF do return
     profiler := get_profiler()
 
     // Get or create child in current node
@@ -171,6 +171,7 @@ region_begin :: proc(name: string) {
 }
 
 region_end :: proc(name: string) {
+    if PROFILING_OFF do return
     profiler := get_profiler()
     entry := profiler.current
     assert(entry.name == name, "region_end mismatch")
