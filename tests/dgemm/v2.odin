@@ -217,11 +217,6 @@ dgemm_v2 :: proc(A, B, C: Matrix, tile_rows, tile_cols: uint) {
     data: Dgemm_Data
     dgemm_data_init(&data, A, B, C, tile_rows, tile_cols)
     defer dgemm_data_destroy(&data)
-
     context.logger = data.logger
-
-    global_ctx: imp.Global_Ctx
-    imp.global_ctx_init(&global_ctx, 40)
-    defer imp.global_ctx_destroy(&global_ctx)
-    imp.launch(&global_ctx, dgemm_parallel, &data)
+    imp.launch(40, dgemm_parallel, &data)
 }

@@ -5,7 +5,6 @@ import "core:mem"
 import "core:sync"
 import "base:runtime"
 import p "core:container/pool"
-import "core:fmt"
 
 MEM_PROFILING_ENABLED :: #config(IMP_MEM_PROFILING_ENABLED, false)
 

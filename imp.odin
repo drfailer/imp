@@ -10,6 +10,13 @@ import "core:fmt"
 
 SENTINEL_CTX :: cast(^Shared_Ctx)uintptr(0xDEADBEEF)
 
+// Imp /////////////////////////////////////////////////////////////////////////
+
+// some shorthands easier to remember
+Imp :: Global_Ctx
+init :: global_ctx_init
+destroy :: global_ctx_destroy
+
 // Contexts ////////////////////////////////////////////////////////////////////
 
 //

@@ -10,7 +10,7 @@ Worker_Data :: struct($T: typeid) {
     parent_path: string,
 }
 
-launch :: proc(ctx: ^Global_Ctx, exec: proc(ctx: Ctx, data: $I), data: I) {
+launch_ctx :: proc(ctx: ^Global_Ctx, exec: proc(ctx: Ctx, data: $I), data: I) {
     thread_count := len(ctx.thread_ctxs)
     threads := make([]^thread.Thread, thread_count - 1, context.temp_allocator)
     parent_path := prof.get_parent_path()
@@ -29,3 +29,12 @@ launch :: proc(ctx: ^Global_Ctx, exec: proc(ctx: Ctx, data: $I), data: I) {
         thread.destroy(t)
     }
 }
+
+launch_threads :: proc(thread_count: int, exec: proc(ctx: Ctx, data: $I), data: I) {
+    ctx: Imp
+    init(&ctx, thread_count)
+    launch_ctx(&ctx, exec, data)
+    destroy(&ctx)
+}
+
+launch :: proc{ launch_ctx, launch_threads }
