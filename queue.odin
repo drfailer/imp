@@ -45,7 +45,6 @@ queue_size :: proc{
 
 Lock_Queue :: struct($T: typeid) #align(CACHE_LINE) {
     mutex: sync.Mutex,
-    _pad: [CACHE_LINE - size_of(sync.Mutex)]u8,
     datas: q.Queue(T),
 }
 
