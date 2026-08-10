@@ -30,9 +30,18 @@ launch_ctx :: proc(ctx: ^Global_Ctx, exec: proc(ctx: Ctx, data: $I), data: I) {
     }
 }
 
-launch_threads :: proc(thread_count: int, exec: proc(ctx: Ctx, data: $I), data: I) {
+launch_threads :: proc(
+    thread_count: int,
+    exec: proc(ctx: Ctx, data: $I),
+    data: I,
+    comm_channel_count := 1,
+    shared_ctx_pool_capacity := DEFAULT_SHARED_CTX_POOL_SIZE,
+    thread_ctx_stack_capacity := DEFAULT_CONTEXT_CAPACITY,
+    thread_scratch_memory_size := DEFAULT_THREAD_SCRATCH_MEMORY_SIZE,
+) {
     ctx: Imp
-    init(&ctx, thread_count)
+    init(&ctx, thread_count, comm_channel_count, shared_ctx_pool_capacity,
+         thread_ctx_stack_capacity, thread_scratch_memory_size)
     launch_ctx(&ctx, exec, data)
     destroy(&ctx)
 }
