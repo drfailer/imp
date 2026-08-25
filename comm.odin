@@ -23,6 +23,7 @@ Comm :: struct($T: typeid) #align(64) {
     closed:   bool,
     waiters:  i32,
     channels: [dynamic]Lock_Queue(T),
+    // TODO: try to replace this with a semaphore and use a group wakeup strategy
     mutex:    sync.Mutex,
     cond:     sync.Cond,
 }
