@@ -2,13 +2,17 @@ package playground
 
 import "core:fmt"
 import "../../"
+import "../../prof"
 
 exec_branch :: proc(i: int) {
+    prof.procedure()
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index() + 1, imp.get_thread_count(), i)
 
     if imp.branch(imp.get_thread_count() / 2) {
+        prof.region("branch1")
         fmt.printfln("branch0(1, 2)[{}/{}]", imp.get_thread_index() + 1, imp.get_thread_count())
     } else {
+        prof.region("branch2")
         fmt.printfln("branch1(1, 2)[{}/{}]", imp.get_thread_index() + 1, imp.get_thread_count())
     }
     imp.join()
@@ -17,6 +21,7 @@ exec_branch :: proc(i: int) {
 }
 
 exec_nested_branches :: proc(i: int) {
+    prof.procedure()
     fmt.printfln("[{}/{}]: i = {}", imp.get_thread_index() + 1, imp.get_thread_count(), i)
 
     if imp.branch(imp.get_thread_count() / 2) {
@@ -36,6 +41,7 @@ exec_nested_branches :: proc(i: int) {
 }
 
 exec_join_to :: proc(i: int) {
+    prof.procedure()
     ensure(imp.get_thread_count() == 8)
     shared_ctx := imp.get_shared_ctx()
     local_ctx := imp.get_local_ctx()
@@ -55,6 +61,7 @@ exec_join_to :: proc(i: int) {
 }
 
 exec_messages :: proc(i: int) {
+    prof.procedure()
     ensure(imp.get_thread_count() == 4)
     buf0: [2][100]u8
     buf1: [2][100]u8
@@ -122,6 +129,7 @@ exec_messages :: proc(i: int) {
 }
 
 exec_sync :: proc(i: int) {
+    prof.procedure()
     val := imp.get_thread_index()
     val1, val2, val3 := val, val * 2, val * 3
     vals := []int{val1, val2, val3}
@@ -145,6 +153,7 @@ exec_sync :: proc(i: int) {
 }
 
 exec_range :: proc(i: int) {
+    prof.procedure()
     vals: [dynamic]int
     if imp.get_thread_index() == 0 {
         vals = make([dynamic]int, 22)
@@ -168,6 +177,7 @@ exec_range :: proc(i: int) {
 }
 
 exec_loop :: proc(i: int) {
+    prof.procedure()
     loop: ^imp.Index_Loop
 
     if imp.single() {
@@ -197,16 +207,18 @@ exec_loop :: proc(i: int) {
 }
 
 run_test :: proc(thread_count: int, exec: proc(data: $I), data: I) {
+    prof.procedure()
     fmt.println("--------------")
     imp.launch(thread_count, exec, data)
 }
 
 main :: proc() {
-    run_test(40, exec_branch, 1)
-    run_test(40, exec_nested_branches, 2)
+    run_test(8, exec_branch, 1)
+    run_test(8, exec_nested_branches, 2)
     run_test(8, exec_join_to, 3)
     run_test(4, exec_messages, 4)
     run_test(4, exec_sync, 5)
     run_test(4, exec_range, 6)
     run_test(4, exec_loop, 8)
+    prof.profile_report()
 }

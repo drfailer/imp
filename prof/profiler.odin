@@ -5,433 +5,221 @@ import "core:time"
 import "core:sync"
 import "core:os"
 import "core:strings"
-import "core:mem"
 import vmem "core:mem/virtual"
+import "core:math"
 import "base:runtime"
 
 ENABLED :: #config(PROF_ENABLED, false)
 
-when ENABLED {
-
-#assert(!ODIN_NO_CRT, "Prof requires the C Runtime (CRT) to be enabled!")
-
-MAX_STACK_SIZE :: #config(PROF_MAX_STACK_SIZE, 64)
-INIT_ENTRIES_CAPACITY :: #config(PROF_INIT_ENTRIES_CAPACITY, 32)
-
-// global stopwatch used to compute the global execution time
-GLOBAL_STOPWATCH: time.Stopwatch
-PROFILERS: [dynamic]^Profiler
-PROFILERS_MUTEX: sync.Mutex
-
-@(thread_local) PROFILER: ^Profiler
-@(thread_local) PROFILING_OFF: bool
-
 Profiler :: struct {
-    index: int,
-    root: ^Profile_Entry,
-    current: ^Profile_Entry,
+    thread_profilers: [dynamic]^Thread_Profiler,
+    mutex: sync.Mutex,
+    stopwatch: time.Stopwatch,
+}
+
+Thread_Profiler :: struct {
+    profiles: map[string]^Profile,
+    disabled: bool,
     arena: vmem.Arena,
+}
+
+Profile :: struct {
     stopwatch: time.Stopwatch,
+    measure: Measure,
+    // TODO: info: string,
+    thread_count: u64,
 }
-
-Profile_Entry :: struct {
-    name: string,
-    parent: ^Profile_Entry,
-    children: map[string]^Profile_Entry,
-    stopwatch: time.Stopwatch,
-    min: time.Duration,
-    max: time.Duration,
-    ttl: time.Duration,
-    count: int,
-}
-
-} else {
-
-Profiler :: struct {}
-
-}
-
-// init ////////////////////////////////////////////////////////////////////////
 
 when ENABLED {
+
+PROFILER: Profiler
+
+@(thread_local)
+THREAD_PROFILER: ^Thread_Profiler
 
 @(init)
 init :: proc "contextless" () {
     context = runtime.default_context()
-    time.stopwatch_start(&GLOBAL_STOPWATCH)
-    PROFILERS = make([dynamic]^Profiler)
+    PROFILER.thread_profilers = make([dynamic]^Thread_Profiler)
+    time.stopwatch_start(&PROFILER.stopwatch)
 }
 
 @(fini)
 fini :: proc "contextless" () {
     context = runtime.default_context()
-    for profiler in PROFILERS {
+    for profiler in PROFILER.thread_profilers {
+        delete(profiler.profiles)
         vmem.arena_destroy(&profiler.arena)
-        free(profiler)
+    }
+    delete(PROFILER.thread_profilers)
+}
+
+@(private)
+init_thread :: proc() {
+    THREAD_PROFILER = new(Thread_Profiler)
+    err := vmem.arena_init_growing(&THREAD_PROFILER.arena)
+    ensure(err == nil, "Failed to initialize thread profiler arena.")
+    THREAD_PROFILER.profiles = make(map[string]^Profile)
+    if sync.guard(&PROFILER.mutex) {
+        append(&PROFILER.thread_profilers, THREAD_PROFILER)
     }
 }
 
-reset :: proc() {
-    time.stopwatch_reset(&GLOBAL_STOPWATCH)
-    time.stopwatch_start(&GLOBAL_STOPWATCH)
+@(private)
+get_thread_profiler :: proc() -> ^Thread_Profiler {
+    if THREAD_PROFILER == nil do init_thread()
+    return THREAD_PROFILER
 }
 
-new_thread :: proc(parent_path: string) {
-    profiler := get_profiler()
-    profiler.root.name = parent_path
-}
-
-enable :: proc() { PROFILING_OFF = false }
-disable :: proc() { PROFILING_OFF = true }
-
-get_parent_path :: proc() -> string {
-    profiler := get_profiler()
-    allocator := vmem.arena_allocator(&profiler.arena)
-    path := make([dynamic]u8, allocator = allocator)
-    build_path_up_to_root(profiler.current, &path)
-    return string(path[:])
-}
-
-@(private="file")
-build_path_up_to_root :: proc(entry: ^Profile_Entry, acc: ^[dynamic]u8) {
-    if entry == nil do return
-    if entry.parent != nil {
-        build_path_up_to_root(entry.parent, acc)
-        append(acc, '/')
+get_profile :: proc(name: string) -> ^Profile {
+    profiler := get_thread_profiler()
+    if profile, ok := profiler.profiles[name]; ok {
+        return profile
     }
-    append(acc, entry.name)
+    profile := new(Profile, allocator = vmem.arena_allocator(&profiler.arena))
+    measure_init(&profile.measure)
+    profiler.profiles[name] = profile
+    return profile
 }
 
-get_profiler :: proc "contextless" () -> ^Profiler {
-    context = runtime.default_context()
-    if PROFILER == nil {
-        PROFILER = new(Profiler)
+region_begin_profile :: proc(profile: ^Profile) -> ^Profile {
+    time.stopwatch_reset(&profile.stopwatch)
+    time.stopwatch_start(&profile.stopwatch)
+    return profile
+}
 
-        if sync.guard(&PROFILERS_MUTEX) {
-            append(&PROFILERS, PROFILER)
+region_begin_name :: proc(name: string) -> ^Profile {
+    return region_begin_profile(get_profile(name))
+}
+
+region_begin :: proc { region_begin_profile, region_begin_name }
+
+region_end :: proc(profile: ^Profile) {
+    time.stopwatch_stop(&profile.stopwatch)
+    measure_add_value(&profile.measure, cast(f64) time.stopwatch_duration(profile.stopwatch))
+}
+
+@(deferred_out=region_end)
+region :: proc(name: string) -> ^Profile {
+    return region_begin(name)
+}
+
+@(deferred_out=region_end)
+procedure :: proc(loc := #caller_location) -> ^Profile {
+    return region_begin(loc.procedure)
+}
+
+profile_report :: proc(profiles_to_print: ..string) {
+    sync.guard(&PROFILER.mutex)
+    ttl_time := time.stopwatch_duration(PROFILER.stopwatch)
+    merged_profiles := make(map[string]Profile)
+    defer delete(merged_profiles)
+
+    for profiler in PROFILER.thread_profilers {
+        for name, profile in profiler.profiles {
+            if name in merged_profiles {
+                mp := &merged_profiles[name]
+                measure_merge(&mp.measure, profile.measure)
+                mp.thread_count += 1
+            } else {
+                mp := profile^
+                mp.thread_count = 1
+                merged_profiles[name] = mp
+            }
         }
-
-        err := vmem.arena_init_growing(&PROFILER.arena)
-        ensure(err == nil, "failed to initialize profiler arena")
-        allocator := vmem.arena_allocator(&PROFILER.arena)
-
-        PROFILER.root = new(Profile_Entry, allocator)
-        PROFILER.root.name = "main"
-        PROFILER.root.parent = nil
-        PROFILER.root.children = make(map[string]^Profile_Entry, INIT_ENTRIES_CAPACITY, allocator)
-        PROFILER.current = PROFILER.root
-    }
-    return PROFILER
-}
-
-} else {
-
-init :: proc() {}
-fini :: proc() {}
-clear :: proc() {}
-reset :: proc() {}
-new_thread :: proc(parent_profiler: ^Profiler) {}
-enable :: proc() {}
-disable :: proc() {}
-get_profiler :: proc() -> ^Profiler { return nil }
-
-}
-
-// region //////////////////////////////////////////////////////////////////////
-
-//
-// profile a specific region of the code
-//
-
-when ENABLED {
-
-region_begin :: proc(name: string) {
-    if PROFILING_OFF do return
-    profiler := get_profiler()
-
-    // Get or create child in current node
-    child_entry: ^Profile_Entry
-    if existing, found := profiler.current.children[name]; found {
-        child_entry = existing
-    } else {
-        allocator := vmem.arena_allocator(&profiler.arena)
-        child_entry = new(Profile_Entry, allocator)
-        child_entry.name = name
-        child_entry.parent = profiler.current
-        child_entry.children = make(map[string]^Profile_Entry, INIT_ENTRIES_CAPACITY, allocator)
-        profiler.current.children[name] = child_entry
     }
 
-    // Move down tree
-    profiler.current = child_entry
-
-    // Start timing
-    time.stopwatch_reset(&child_entry.stopwatch)
-    time.stopwatch_start(&child_entry.stopwatch)
-}
-
-region_end :: proc(name: string) {
-    if PROFILING_OFF do return
-    profiler := get_profiler()
-    entry := profiler.current
-    assert(entry.name == name, "region_end mismatch")
-
-    // Stop timer and update stats
-    time.stopwatch_stop(&entry.stopwatch)
-    duration := time.stopwatch_duration(entry.stopwatch)
-
-    entry.min = min(entry.min, duration) if entry.min > 0 else duration
-    entry.max = max(entry.max, duration)
-    entry.ttl += duration
-    entry.count += 1
-
-    // Navigate up tree
-    profiler.current = entry.parent
-}
-
-@(deferred_in=region_end)
-region :: proc(name: string) -> bool {
-    region_begin(name)
-    return true
-}
-
-procedure_end :: proc(loc := #caller_location) {
-    region_end(loc.procedure)
-}
-
-@(deferred_in=procedure_end)
-procedure :: proc(loc := #caller_location) {
-    region_begin(loc.procedure)
-}
-
-} else {
-
-region_begin :: proc(name: string) {}
-region_end :: proc(name: string) {}
-region :: proc(name: string) -> bool { return true }
-
-procedure_end :: proc(loc := #caller_location) {}
-procedure :: proc(loc := #caller_location) {}
-
-}
-
-// report //////////////////////////////////////////////////////////////////////
-
-ReportFormat :: enum {
-    Dot,
-    // html table?
-    // json?
-}
-
-when ENABLED {
-
-report :: proc(target_paths: []string = {}) {
-    infos := gather_profile_infos()
-    defer destroy_gathered_profile_infos(infos)
-
-    print_entry :: proc(path: string, infos: Gathered_Profile_Infos) {
-        entry := &infos.entries[path]
-        avg := time.Duration(f64(entry.ttl) / f64(entry.count))
-        ttl_avg := time.Duration(f64(entry.ttl) / f64(entry.thread_count))
-        ratio   := f64(ttl_avg) / f64(infos.global_time)
-        percent := 100 * ratio
-
-        fmt.println("PATH:", path)
-        fmt.printfln("THREAD TIME: {} ({})", entry.ttl, entry.thread_count)
-        fmt.printfln("TOTAL TIME: {} ({:.3f}%%)", ttl_avg, percent)
-        fmt.printfln("ELEMENT TIME: avg = {}, min = {}, max = {} ({})", avg, entry.min, entry.max, entry.count)
-        fmt.println()
+    print_profile := proc(name: string, profile: Profile, ttl_time: time.Duration) {
+        mean   := time.Duration(profile.measure.mean)
+        stddev := time.Duration(measure_stddev(profile.measure))
+        min    := time.Duration(profile.measure.min)
+        max    := time.Duration(profile.measure.max)
+        ttl    := time.Duration(profile.measure.ttl)
+        count  := profile.measure.count
+        ratio  := profile.measure.ttl / (f64(profile.thread_count) * f64(ttl_time)) * 100
+        fmt.printfln("{}: {} +- {} [{}; {}] ({} | {} | {}) {:.1f}%%", name, mean, stddev, min, max, ttl, profile.thread_count, count, ratio)
     }
 
     fmt.println("===================================== PROF =====================================")
-    fmt.println()
-    if len(target_paths) == 0 {
-        for path, entry in infos.entries {
-            print_entry(path, infos)
+    if len(profiles_to_print) == 0 {
+        for name, profile in merged_profiles {
+            print_profile(name, profile, ttl_time)
         }
     } else {
-        // Only print exact path suffix matches
-        for path, entry in infos.entries {
-            for target in target_paths {
-                if strings.has_suffix(path, target) {
-                    print_entry(path, infos)
-                    break
-                }
-            }
+        for name in profiles_to_print {
+            print_profile(name, merged_profiles[name], ttl_time)
         }
     }
     fmt.println("================================================================================")
 }
 
-print_report_to_file :: proc(filename: string, format := ReportFormat.Dot) {
-    file, err := os.open(filename, {.Write, .Create, .Trunc}, {.Read_Other, .Write_Group, .Read_Other, .Write_User, .Read_User})
-    ensure(err == nil, "failed to open file")
-    switch format {
-    case .Dot: generate_dot_file(file)
-    }
-}
-
-@(private="file")
-time_to_rgb :: proc(dur, ttl: time.Duration) -> (r, g, b: u8) {
-    dur := f64(dur)
-    ttl := f64(ttl)
-    fr, fg, fb: f64
-    fr = 1
-    fg = 1
-    fb = 1
-
-    if dur < 0.25 * ttl {
-        fr = 0
-        fg = 4 * f64(dur) / f64(ttl)
-    } else if dur < 0.5 * ttl {
-        fr = 0
-        fb = 1 + 4 * (0.25 * ttl - dur) / ttl
-    } else if dur < 0.75 * ttl {
-        fr = 4 * (dur - 0.5 * ttl) / ttl
-        fb = 0
-    } else {
-        fg = 1 + 4 * (0.75 * ttl - dur) / ttl
-        fb = 0
-    }
-    r = cast(u8)clamp(fr * 255, 0, 255)
-    g = cast(u8)clamp(fg * 255, 0, 255)
-    b = cast(u8)clamp(fb * 255, 0, 255)
-    return r, g, b
-}
-
-@(private="file")
-generate_dot_file :: proc(file: ^os.File) {
-    infos := gather_profile_infos()
-    defer destroy_gathered_profile_infos(infos)
-
-    fmt.fprintln(file, "digraph Program_Execution {")
-    fmt.fprintfln(file, "label=\"execution time = {}\";", infos.global_time)
-
-    // set the main entry
-    fmt.fprintfln(file, "main [label=\"{} ({})\",shape=rectangle];", os.args[0], infos.global_time)
-
-    for path, entry in infos.entries {
-        avg := time.Duration(f64(entry.ttl) / f64(entry.count))
-        ttl_avg := time.Duration(f64(entry.ttl) / f64(entry.thread_count))
-        percent := 100 * f64(ttl_avg) / f64(infos.global_time)
-        r, g, b := time_to_rgb(ttl_avg, infos.global_time)
-
-        fmt.fprintfln(file, "\"{}\" [label=\"{}\\ncount = {}\\navg = {}, min = {}, max = {}\\nttl = {} ({:.3f}%%)\\nthreads = {} ({})\",shape=rectangle,color=\"#%2X%2X%2X\",penwidth=2];",
-            path, entry.name, entry.count, avg, entry.min, entry.max, ttl_avg,
-            percent, entry.thread_count, entry.ttl, r, g, b)
-    }
-
-    // Generate edges with labels
-    for path, entry in infos.entries {
-        parent_path := entry.parent_path
-        if parent_path != "" {
-            // Get parent entry to compute percentage
-            parent_entry, parent_found := &infos.entries[parent_path]
-            parent_ttl := parent_entry.ttl if parent_found else infos.global_time
-            edge_percent := 100 * (f64(entry.ttl) / f64(parent_ttl))
-            fmt.fprintfln(file, "\"{}\" -> \"{}\" [label=\"x {} / {:.3f}%%\"];",
-                parent_path, path, entry.count, edge_percent)
-        } else if path != "main" {
-            // Direct child of main
-            edge_percent := 100 * (f64(entry.ttl) / f64(infos.global_time))
-            fmt.fprintfln(file, "main -> \"{}\" [label=\"x {} / {:.3f}%%\"];",
-                path, entry.count, edge_percent)
-        }
-    }
-
-    fmt.fprintfln(file, "}")
-}
-
 } else {
 
-report :: proc(target_entries: []string = {}) {}
-print_report_to_file :: proc(filename: string, format := ReportFormat.Dot) {}
+@(thread_local) DUMMY_PROFILE: Profile
+
+region_begin :: proc(name: string) -> ^Profile {
+    return &DUMMY_PROFILE
+}
+
+region_end :: proc(profile: ^Profile) {}
+
+@(deferred_out=region_end)
+region :: proc(name: string) -> ^Profile {
+    return region_begin(name)
+}
+
+@(deferred_out=region_end)
+procedure :: proc(loc := #caller_location) -> ^Profile {
+    return region_begin(loc.procedure)
+}
+
+profile_report :: proc() {}
 
 }
 
-// internals ///////////////////////////////////////////////////////////////////
-
-when ENABLED {
-
-@(private="file")
-map_get_ptr :: proc(m: ^map[$K]$V, key: K) -> ^V {
-    value_ptr, found := &m[key]
-    if !found {
-        m[key] = {}
-        value_ptr = &m[key]
-    }
-    return value_ptr
+Measure :: struct {
+    count: u64,
+    mean: f64,
+    m2: f64,
+    min: f64,
+    max: f64,
+    ttl: f64,
 }
 
-
-@(private="file")
-Gathered_Profile_Entry :: struct {
-    name: string,
-    min: time.Duration,
-    max: time.Duration,
-    ttl: time.Duration,
-    count: int,
-    thread_count: uint,
-    parent_path: string,  // For edge generation
+measure_init :: proc(m: ^Measure) {
+    m.count = 0
+    m.mean = 0
+    m.m2 = 0
+    m.min = max(f64)
+    m.max = 0
+    m.ttl = 0
 }
 
-@(private="file")
-Gathered_Profile_Infos :: struct {
-    entries: map[string]Gathered_Profile_Entry,
-    global_time: time.Duration,
+measure_add_value :: proc(m: ^Measure, x: f64) {
+    m.count += 1
+    old_mean := m.mean
+    m.mean += (x - m.mean) / f64(m.count)
+    m.m2   += (x - old_mean) * (x - m.mean)
+    m.min = min(m.min, x)
+    m.max = max(m.max, x)
+    m.ttl += x
 }
 
-@(private="file")
-gather_profile_infos :: proc(allocator := context.allocator) -> (infos: Gathered_Profile_Infos) {
-    infos.global_time = time.stopwatch_duration(GLOBAL_STOPWATCH)
-    infos.entries = make(map[string]Gathered_Profile_Entry, allocator)
+measure_merge :: proc(dst: ^Measure, m: Measure) {
+    if m.count == 0 do return
+    count  := dst.count + m.count
+    delta  := dst.mean - m.mean
+    mean   := (f64(dst.count) * dst.mean + f64(m.count) * m.mean) / f64(count)
+    m2     := dst.m2 + m.m2 + delta * delta * f64(dst.count * m.count) / f64(count)
 
-    // Traverse all profiler trees
-    for profiler in PROFILERS {
-        if profiler.root != nil {
-            flatten_tree_recursive(profiler.root, "", &infos.entries, allocator)
-        }
-    }
-    return
+    dst.count = count
+    dst.mean  = mean
+    dst.m2    = m2
+    dst.min   = min(dst.min, m.min)
+    dst.max   = max(dst.max, m.max)
+    dst.ttl  += m.ttl
 }
 
-@(private="file")
-flatten_tree_recursive :: proc(
-    entry: ^Profile_Entry,
-    parent_path: string,
-    gathered: ^map[string]Gathered_Profile_Entry,
-    allocator := context.allocator,
-) {
-    // Build path
-    current_path: string
-    if parent_path == "" {
-        current_path = entry.name
-    } else {
-        current_path = fmt.aprintf("{}/{}", parent_path, entry.name, allocator=allocator)
-    }
-
-    // Aggregate if entry was called
-    if entry.count > 0 {
-        global_entry := map_get_ptr(gathered, current_path)
-
-        global_entry.min = min(entry.min, global_entry.min) if global_entry.min > 0 else entry.min
-        global_entry.max = max(entry.max, global_entry.max)
-        global_entry.ttl += entry.ttl
-        global_entry.count += entry.count
-        global_entry.thread_count += 1
-        global_entry.name = entry.name
-        global_entry.parent_path = parent_path if parent_path != "" else ""
-    }
-
-    // Recurse children
-    for _, child in entry.children {
-        flatten_tree_recursive(child, current_path, gathered, allocator)
-    }
-}
-
-@(private="file")
-destroy_gathered_profile_infos :: proc(infos: Gathered_Profile_Infos) {
-    delete(infos.entries)
-}
-
+measure_stddev :: proc(m: Measure) -> f64 {
+    return math.sqrt(m.m2 / f64(m.count))
 }

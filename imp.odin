@@ -33,7 +33,6 @@ Worker_Data :: struct($T: typeid) {
     thread_index: int,
     data: T,
     exec: proc(data: T),
-    parent_path: string,
 }
 
 //
@@ -54,16 +53,14 @@ launch :: proc(
 
     thread_count := len(GLOBAL_CTX.thread_ctxs)
     threads := make([]^thread.Thread, thread_count - 1, context.temp_allocator)
-    parent_path := prof.get_parent_path()
 
     //
     // launch the threads
     //
     for &t, idx in threads {
-        wd := Worker_Data(I){idx + 1, data, exec, parent_path}
+        wd := Worker_Data(I){idx + 1, data, exec}
         t = thread.create_and_start_with_poly_data(wd, proc(wd: Worker_Data(I)) {
             init_thread(wd.thread_index)
-            prof.new_thread(wd.parent_path)
             wd.exec(wd.data)
         }, init_context = context)
     }
