@@ -1,273 +1,138 @@
 package imp
 
+import "core:thread"
 import "core:sync"
 import "core:mem"
 import "base:intrinsics"
-import q "core:container/queue"
 import "base:runtime"
-import "core:time"
-import "core:fmt"
+import "prof"
 
-SENTINEL_CTX :: cast(^Shared_Ctx)uintptr(0xDEADBEEF)
+// Globals /////////////////////////////////////////////////////////////////////
 
-// Imp /////////////////////////////////////////////////////////////////////////
+GLOBAL_CTX                 : Global_Ctx
+@(thread_local) THREAD_CTX : ^Thread_Ctx
 
-// some shorthands easier to remember
-Imp :: Global_Ctx
-init :: global_ctx_init
-destroy :: global_ctx_destroy
-
-// Contexts ////////////////////////////////////////////////////////////////////
-
-//
-// Context global to a group of thread.
-//
-
-Global_Ctx :: struct {
-    thread_ctxs: [dynamic]Thread_Ctx,
-    arena: mem.Dynamic_Arena,
-    mutex: sync.Mutex,
-    shared: struct {
-        root: ^Shared_Ctx,
-        free_list: ^Shared_Ctx,
-    },
-    comm_channel_count: int,
+init :: proc(thread_count: int,
+             comm_channel_count         := 1,
+             shared_ctx_pool_capacity   := DEFAULT_SHARED_CTX_POOL_SIZE,
+             thread_ctx_stack_capacity  := DEFAULT_CONTEXT_CAPACITY,
+             thread_scratch_memory_size := DEFAULT_THREAD_SCRATCH_MEMORY_SIZE) {
+    global_ctx_init(&GLOBAL_CTX, thread_count, comm_channel_count, shared_ctx_pool_capacity,
+                    thread_ctx_stack_capacity, thread_scratch_memory_size);
 }
 
-DEFAULT_CONTEXT_CAPACITY :: #config(IMP_DEFAULT_CONTEXT_CAPACITY, 64)
-DEFAULT_SHARED_CTX_POOL_SIZE :: #config(IMP_DEFAULT_SHARED_CTX_POOL_SIZE, 16)
-DEFAULT_THREAD_SCRATCH_MEMORY_SIZE :: #config(IMP_DEFAULT_THREAD_SCRATCH_MEMORY_SIZE, 1024*4)
-
-global_ctx_init :: proc(ctx: ^Global_Ctx, thread_count: int,
-                        comm_channel_count := 1,
-                        shared_ctx_pool_capacity := DEFAULT_SHARED_CTX_POOL_SIZE,
-                        thread_ctx_stack_capacity := DEFAULT_CONTEXT_CAPACITY,
-                        thread_scratch_memory_size := DEFAULT_THREAD_SCRATCH_MEMORY_SIZE) {
-    mem.dynamic_arena_init(&ctx.arena)
-    allocator := mem.dynamic_arena_allocator(&ctx.arena)
-
-    ctx.comm_channel_count = comm_channel_count
-
-    // Setup Root Context
-    ctx.shared.root = new(Shared_Ctx, allocator)
-    shared_ctx_init(ctx.shared.root, thread_count, comm_channel_count)
-    ctx.shared.free_list = nil
-    for _ in 0..<DEFAULT_SHARED_CTX_POOL_SIZE {
-        shared_ctx := new(Shared_Ctx, allocator)
-        shared_ctx_init(shared_ctx, thread_count - 1, comm_channel_count)
-        release_shared_ctx(ctx, shared_ctx) // release add to the pool
-    }
-
-    // Create Threads
-    ctx.thread_ctxs = make([dynamic]Thread_Ctx, thread_count, allocator)
-    for &tctx, idx in ctx.thread_ctxs {
-        thread_ctx_init(&tctx, idx, thread_ctx_stack_capacity, comm_channel_count,
-                        thread_scratch_memory_size, ctx.shared.root, allocator)
-    }
+fini :: proc() {
+    global_ctx_destroy(&GLOBAL_CTX);
 }
 
-global_ctx_destroy :: proc(ctx: ^Global_Ctx) {
-    allocator := mem.dynamic_arena_allocator(&ctx.arena)
-    for &tctx in ctx.thread_ctxs {
-        thread_ctx_destroy(&tctx)
-    }
-    shared_ctx_destroy(ctx.shared.root)
-    curr := ctx.shared.free_list
-    for curr != nil {
-        shared_ctx_destroy(curr)
-        free(curr, allocator)
-        curr = curr.parent
-    }
-    mem.dynamic_arena_destroy(&ctx.arena)
+init_thread :: proc(index: int) {
+    THREAD_CTX = &GLOBAL_CTX.thread_ctxs[index]
 }
 
-@(private)
-alloc_shared_ctx :: proc(ctx: ^Global_Ctx) -> ^Shared_Ctx {
-    sync.mutex_lock(&ctx.mutex)
-    defer sync.mutex_unlock(&ctx.mutex)
-
-    if ctx.shared.free_list != nil {
-        shared_ctx := ctx.shared.free_list
-        ctx.shared.free_list = shared_ctx.parent
-        return shared_ctx
-    }
-    allocator := mem.dynamic_arena_allocator(&ctx.arena)
-    shared_ctx := new(Shared_Ctx, allocator)
-    return shared_ctx
-}
-
-@(private)
-release_shared_ctx :: proc(ctx: ^Global_Ctx, shared_ctx: ^Shared_Ctx) {
-    shared_ctx.branch.ctxs = {nil, nil}
-    shared_ctx.branch.arrival_counter = 0
-
-    sync.mutex_lock(&ctx.mutex)
-    defer sync.mutex_unlock(&ctx.mutex)
-    shared_ctx.parent = ctx.shared.free_list
-    ctx.shared.free_list = shared_ctx
-}
-
-//
-// Context usique to the thread.
-//
-
-Thread_Ctx :: struct {
-    id: int,
-    comm: Comm(Message(Data)),
-    ctx_stack: [dynamic]Local_Ctx,
-    scratch_memory: mem.Scratch,
-}
-
-thread_ctx_init :: proc(ctx: ^Thread_Ctx, index,
-                        ctx_stack_capacity, comm_channel_count: int,
-                        scratch_memory_size: int,
-                        shared_ctx: ^Shared_Ctx, allocator: mem.Allocator) {
-    ctx.id = index
-    comm_init(&ctx.comm, comm_channel_count, allocator)
-    ctx.ctx_stack = make([dynamic]Local_Ctx, 1, ctx_stack_capacity + 1, allocator)
-    ctx.ctx_stack[0] = Local_Ctx{ shared_ctx = shared_ctx, thread_index = index }
-    mem.scratch_init(&ctx.scratch_memory, scratch_memory_size, allocator)
-}
-
-thread_ctx_destroy :: proc(ctx: ^Thread_Ctx) {
-    comm_destroy(&ctx.comm)
-    delete(ctx.ctx_stack)
-    mem.scratch_destroy(&ctx.scratch_memory)
-}
-
-//
-// Context shared between a group of thread (creating a new branch creates a
-// new shared context).
-//
-
-Shared_Ctx :: struct {
-    parent: ^Shared_Ctx,
-    thread_count: int,
-    thread_index_offset: int,
-    cond: sync.Cond,
-    mutex: sync.Mutex,
-    branch: struct #align(64) {
-        generation: int,      // Solves the fast-laps-slow hazard
-        _pad_gen: [64 - size_of(int)]u8,
-        ctxs: [2]^Shared_Ctx, // used to shared new context with threads in left and right branch
-        _pad0: [64 - size_of([2]^Shared_Ctx)]u8,
-        fini_counter: int,    // Exit reference count
-        _pad1: [64 - size_of(int)]u8,
-        arrival_counter: int, // ASAP reset counter
-        _pad2: [64 - size_of(int)]u8,
-        join_sema: sync.Sema, // wakes branch-closing threads in join
-    },
-    sync: union { // use for synchronizing values
-        rawptr,
-        runtime.Raw_Slice,
-    },
-    barrier: Barrier,
-}
-
-shared_ctx_init :: proc(ctx: ^Shared_Ctx, thread_count, comm_channel_count: int) {
-    ctx.thread_count = thread_count
-    barrier_init(&ctx.barrier, thread_count)
-}
-
-shared_ctx_destroy :: proc(ctx: ^Shared_Ctx) {
-}
-
-//
-// Context local to a thread within a branch. Each new branch stacks a new
-// local context.
-//
-
-Local_Ctx :: struct {
-    shared_ctx: ^Shared_Ctx,
+Worker_Data :: struct($T: typeid) {
     thread_index: int,
-    branch_generation: int, // Preserved perfectly by the context stack
+    data: T,
+    exec: proc(data: T),
+    parent_path: string,
 }
 
 //
-// Context used in the API.
+// Launch the threads and initialize the contexts using the given configuration.
 //
+launch :: proc(
+    thread_count: int,
+    exec: proc(data: $I),
+    data: I,
+    comm_channel_count         := 1,
+    shared_ctx_pool_capacity   := DEFAULT_SHARED_CTX_POOL_SIZE,
+    thread_ctx_stack_capacity  := DEFAULT_CONTEXT_CAPACITY,
+    thread_scratch_memory_size := DEFAULT_THREAD_SCRATCH_MEMORY_SIZE,
+) {
+    init(thread_count, comm_channel_count, shared_ctx_pool_capacity,
+         thread_ctx_stack_capacity, thread_scratch_memory_size)
+    defer fini()
 
-Ctx :: struct {
-    global_ctx: ^Global_Ctx,
-    thread_ctx: ^Thread_Ctx,
-}
+    thread_count := len(GLOBAL_CTX.thread_ctxs)
+    threads := make([]^thread.Thread, thread_count - 1, context.temp_allocator)
+    parent_path := prof.get_parent_path()
 
-// Data ////////////////////////////////////////////////////////////////////////
-
-Data :: struct {
-    type: typeid,
-    ptr: rawptr,
-}
-
-data_ptr :: #force_inline proc(data: Data, $T: typeid) -> ^T {
-    when ODIN_DEBUG {
-        if data.type != T do panic("tried to unpack data from the wrong type")
+    //
+    // launch the threads
+    //
+    for &t, idx in threads {
+        wd := Worker_Data(I){idx + 1, data, exec, parent_path}
+        t = thread.create_and_start_with_poly_data(wd, proc(wd: Worker_Data(I)) {
+            init_thread(wd.thread_index)
+            prof.new_thread(wd.parent_path)
+            wd.exec(wd.data)
+        }, init_context = context)
     }
-    return cast(^T)data.ptr
-}
 
-data_type :: proc(data: Data) -> typeid {
-    return data.type
-}
+    //
+    // the main thread executes the function too
+    //
+    init_thread(0)
+    exec(data)
 
-make_data :: proc(ptr: ^$T) -> Data {
-    return Data{T, ptr}
-}
-
-// Parallel API ////////////////////////////////////////////////////////////////
-
-// accessors ///////////////////////////
-
-get_thread_index :: proc(ctx: Ctx) -> int {
-    return get_local_ctx(ctx).thread_index
-}
-
-get_thread_id :: proc(ctx: Ctx) -> int {
-    return ctx.thread_ctx.id
-}
-
-get_thread_count :: proc(ctx: Ctx) -> int {
-    return get_shared_ctx(ctx).thread_count
-}
-
-get_local_ctx :: #force_inline proc(ctx: Ctx) -> ^Local_Ctx {
-    #no_bounds_check {
-        return &ctx.thread_ctx.ctx_stack[len(ctx.thread_ctx.ctx_stack) - 1]
+    //
+    // join the threads
+    //
+    for &t in threads {
+        thread.join(t)
+        thread.destroy(t)
     }
 }
 
-get_shared_ctx :: proc(ctx: Ctx) -> ^Shared_Ctx {
-    return get_local_ctx(ctx).shared_ctx
+// Accessors ///////////////////////////////////////////////////////////////////
+
+get_thread_index :: proc() -> int {
+    return get_local_ctx().thread_index
 }
 
-get_scratch_allocator :: proc(ctx: Ctx) -> mem.Allocator {
-    return mem.scratch_allocator(&ctx.thread_ctx.scratch_memory)
+get_thread_id :: proc() -> int {
+    return THREAD_CTX.id
 }
 
-// single //////////////////////////////
-
-single :: proc(ctx: Ctx, index := 0) -> bool {
-    return get_thread_index(ctx) == index
+get_thread_count :: proc() -> int {
+    return get_shared_ctx().thread_count
 }
 
-// barrier /////////////////////////////
-
-barrier :: proc(ctx: Ctx, kind := BarrierKind.Spin) {
-    barrier_wait(&get_shared_ctx(ctx).barrier, kind)
+get_local_ctx :: proc() -> ^Local_Ctx {
+    return &THREAD_CTX.ctx_stack[len(THREAD_CTX.ctx_stack) - 1]
 }
 
-// sync values /////////////////////////
+get_shared_ctx :: proc() -> ^Shared_Ctx {
+    return get_local_ctx().shared_ctx
+}
 
-sync_vals_slice :: proc(ctx: Ctx, master_index: int, vals: []$T) {
+get_scratch_allocator :: proc() -> mem.Allocator {
+    return mem.scratch_allocator(&THREAD_CTX.scratch_memory)
+}
+
+// single //////////////////////////////////////////////////////////////////////
+
+single :: proc(index := 0) -> bool {
+    return get_thread_index() == index
+}
+
+// barrier /////////////////////////////////////////////////////////////////////
+
+barrier :: proc(kind := BarrierKind.Spin) {
+    barrier_wait(&get_shared_ctx().barrier, kind)
+}
+
+// sync values /////////////////////////////////////////////////////////////////
+
+sync_vals_slice :: proc(master_index: int, vals: []$T) {
     if vals == nil do return
 
-    shared_ctx := get_shared_ctx(ctx)
-    thread_index := get_thread_index(ctx)
+    shared_ctx := get_shared_ctx()
+    thread_index := get_thread_index()
 
     if thread_index == master_index {
         shared_ctx.sync = runtime.Raw_Slice{raw_data(vals), len(vals)}
     }
-    barrier(ctx, .Spin)
+    barrier(.Spin)
     if thread_index != master_index {
         master_vals := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
         when ODIN_DEBUG {
@@ -275,12 +140,12 @@ sync_vals_slice :: proc(ctx: Ctx, master_index: int, vals: []$T) {
         }
         mem.copy(raw_data(vals), raw_data(master_vals), len(vals) * size_of(T))
     }
-    barrier(ctx, .Spin)
+    barrier(.Spin)
 }
 
-sync_vals_variadic :: proc(ctx: Ctx, master_index: int, $T: typeid, vals: ..^T) {
-    shared_ctx := get_shared_ctx(ctx)
-    thread_index := get_thread_index(ctx)
+sync_vals_variadic :: proc(master_index: int, $T: typeid, vals: ..^T) {
+    shared_ctx := get_shared_ctx()
+    thread_index := get_thread_index()
 
     if thread_index == master_index {
         vals_array := make([]T, len(vals), context.temp_allocator)
@@ -289,14 +154,14 @@ sync_vals_variadic :: proc(ctx: Ctx, master_index: int, $T: typeid, vals: ..^T) 
         }
         shared_ctx.sync = runtime.Raw_Slice{raw_data(vals_array), len(vals_array)}
     }
-    barrier(ctx, .Spin)
+    barrier(.Spin)
     if thread_index != master_index {
         master_vals := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
         for val, idx in vals {
             val^ = master_vals[idx]
         }
     }
-    barrier(ctx, .Spin)
+    barrier(.Spin)
 }
 
 sync_vals :: proc{
@@ -304,29 +169,29 @@ sync_vals :: proc{
     sync_vals_variadic,
 }
 
-sync_val :: proc(ctx: Ctx, master_index: int, val: ^$T) {
-    shared_ctx := get_shared_ctx(ctx)
-    thread_index := get_thread_index(ctx)
+sync_val :: proc(master_index: int, val: ^$T) {
+    shared_ctx := get_shared_ctx()
+    thread_index := get_thread_index()
 
     if thread_index == master_index {
         shared_ctx.sync = cast(rawptr)val
     }
-    barrier(ctx, .Spin)
+    barrier(.Spin)
     if thread_index != master_index {
         val^ = (cast(^T)shared_ctx.sync.(rawptr))^
     }
-    barrier(ctx, .Spin)
+    barrier(.Spin)
 }
 
-// range ///////////////////////////////
+// range ///////////////////////////////////////////////////////////////////////
 
 Range :: struct {
     it, max: int,
 }
 
-range_init :: proc(ctx: Ctx, count: int) -> Range {
-    thread_count := get_thread_count(ctx)
-    thread_index := get_thread_index(ctx)
+range_init :: proc(count: int) -> Range {
+    thread_count := get_thread_count()
+    thread_index := get_thread_index()
 
     if thread_count >= count {
         return Range{thread_index, min(count, thread_index + 1)}
@@ -355,17 +220,17 @@ range_next :: proc{
     range_next_imut,
 }
 
-// reduce //////////////////////////////
+// reduce //////////////////////////////////////////////////////////////////////
 
-reduce_imut :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
+reduce_imut :: proc(values: []$T, op: proc(val, acc: T) -> T) -> T {
     when ODIN_DEBUG { assert(len(values) > 0) }
 
-    shared_ctx := get_shared_ctx(ctx)
-    thread_index := get_thread_index(ctx)
-    thread_count := get_thread_count(ctx)
+    shared_ctx := get_shared_ctx()
+    thread_index := get_thread_index()
+    thread_count := get_thread_count()
     count := len(values)
 
-    r := range_init(ctx, count)
+    r := range_init(count)
     local_result: T
     if r.it < r.max {
         local_result = values[r.it]
@@ -377,13 +242,13 @@ reduce_imut :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
     if thread_count == 1 do return local_result
 
     if thread_index == 0 {
-        partials := make([]T, thread_count, get_scratch_allocator(ctx))
+        partials := make([]T, thread_count, get_scratch_allocator())
         shared_ctx.sync = runtime.Raw_Slice{raw_data(partials), len(partials)}
     }
-    barrier(ctx)
+    barrier()
     partials := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
     if r.it < r.max do partials[thread_index] = local_result
-    barrier(ctx)
+    barrier()
 
     effective_count: int
     if thread_count >= count {
@@ -396,19 +261,19 @@ reduce_imut :: proc(ctx: Ctx, values: []$T, op: proc(val, acc: T) -> T) -> T {
     for i in 1 ..< effective_count {
         result = op(partials[i], result)
     }
-    barrier(ctx)
+    barrier()
     return result
 }
 
-reduce_mut :: proc(ctx: Ctx, values: []$T, op: proc(val: T, acc: ^T)) -> T {
+reduce_mut :: proc(values: []$T, op: proc(val: T, acc: ^T)) -> T {
     when ODIN_DEBUG { assert(len(values) > 0) }
 
-    shared_ctx := get_shared_ctx(ctx)
-    thread_index := get_thread_index(ctx)
-    thread_count := get_thread_count(ctx)
+    shared_ctx := get_shared_ctx()
+    thread_index := get_thread_index()
+    thread_count := get_thread_count()
     count := len(values)
 
-    r := range_init(ctx, count)
+    r := range_init(count)
     local_result: T
     if r.it < r.max {
         local_result = values[r.it]
@@ -420,13 +285,13 @@ reduce_mut :: proc(ctx: Ctx, values: []$T, op: proc(val: T, acc: ^T)) -> T {
     if thread_count == 1 do return local_result
 
     if thread_index == 0 {
-        partials := make([]T, thread_count, get_scratch_allocator(ctx))
+        partials := make([]T, thread_count, get_scratch_allocator())
         shared_ctx.sync = runtime.Raw_Slice{raw_data(partials), len(partials)}
     }
-    barrier(ctx)
+    barrier()
     partials := transmute([]T)shared_ctx.sync.(runtime.Raw_Slice)
     if r.it < r.max do partials[thread_index] = local_result
-    barrier(ctx)
+    barrier()
 
     effective_count: int
     if thread_count >= count {
@@ -439,7 +304,7 @@ reduce_mut :: proc(ctx: Ctx, values: []$T, op: proc(val: T, acc: ^T)) -> T {
     for i in 1 ..< effective_count {
         op(partials[i], &result)
     }
-    barrier(ctx)
+    barrier()
     return result
 }
 
@@ -456,27 +321,27 @@ Reduce_Op :: enum {
     Mut_Mul,
 }
 
-reduce_builtins :: proc(ctx: Ctx, values: []$T, $op: Reduce_Op) -> T {
+reduce_builtins :: proc(values: []$T, $op: Reduce_Op) -> T {
     when op == .And {
-        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val && acc })
+        return reduce_imut(values, proc(val, acc: T) -> T { return val && acc })
     } else when op == .Or {
-        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val || acc })
+        return reduce_imut(values, proc(val, acc: T) -> T { return val || acc })
     } else when op == .Add {
-        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val + acc })
+        return reduce_imut(values, proc(val, acc: T) -> T { return val + acc })
     } else when op == .Sub {
-        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val - acc })
+        return reduce_imut(values, proc(val, acc: T) -> T { return val - acc })
     } else when op == .Mul {
-        return reduce_imut(ctx, values, proc(val, acc: T) -> T { return val * acc })
+        return reduce_imut(values, proc(val, acc: T) -> T { return val * acc })
     } else when op == .Mut_And {
-        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ &= val })
+        return reduce_mut(values, proc(val: T, acc: ^T) { acc^ &= val })
     } else when op == .Mut_Or {
-        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ |= val })
+        return reduce_mut(values, proc(val: T, acc: ^T) { acc^ |= val })
     } else when op == .Mut_Add {
-        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ += val })
+        return reduce_mut(values, proc(val: T, acc: ^T) { acc^ += val })
     } else when op == .Mut_Sub {
-        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ -= val })
+        return reduce_mut(values, proc(val: T, acc: ^T) { acc^ -= val })
     } else when op == .Mut_Mul {
-        return reduce_mut(ctx, values, proc(val: T, acc: ^T) { acc^ *= val })
+        return reduce_mut(values, proc(val: T, acc: ^T) { acc^ *= val })
     }
     panic("unreachable")
 }
@@ -487,12 +352,12 @@ reduce :: proc{
     reduce_builtins,
 }
 
-// branch //////////////////////////////
+// branch //////////////////////////////////////////////////////////////////////
 
 Branch_Ctx :: distinct [2]^Shared_Ctx
 
-branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bool {
-    parent_local := get_local_ctx(ctx)
+branch :: proc(thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bool {
+    parent_local := get_local_ctx()
     parent_ctx := parent_local.shared_ctx
 
     my_expected_gen := parent_local.branch_generation + 1
@@ -521,8 +386,8 @@ branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bo
             &parent_ctx.branch.ctxs[1], expected, SENTINEL_CTX,
             .Acquire, .Acquire); ok
         {
-            node0 := alloc_shared_ctx(ctx.global_ctx)
-            node1 := alloc_shared_ctx(ctx.global_ctx)
+            node0 := alloc_shared_ctx(&GLOBAL_CTX)
+            node1 := alloc_shared_ctx(&GLOBAL_CTX)
 
             node0.thread_count = thread_count
             node0.thread_index_offset = parent_ctx.thread_index_offset
@@ -590,25 +455,25 @@ branch :: proc(ctx: Ctx, thread_count: int, branch_ctx: ^Branch_Ctx = nil) -> bo
         sync.sema_post(&parent_ctx.branch.join_sema, 2)
     }
 
-    append(&ctx.thread_ctx.ctx_stack, new_local)
+    append(&THREAD_CTX.ctx_stack, new_local)
     return new_local.shared_ctx == ctx0
 }
 
-join :: proc(ctx: Ctx) {
-    cur_ctx := get_shared_ctx(ctx)
+join :: proc() {
+    cur_ctx := get_shared_ctx()
     parent_ctx := cur_ctx.parent
 
     prev_count := sync.atomic_sub_explicit(&cur_ctx.branch.fini_counter, 1, .Relaxed)
     if prev_count == 1 {
         sync.sema_wait(&parent_ctx.branch.join_sema)
-        release_shared_ctx(ctx.global_ctx, cur_ctx)
+        release_shared_ctx(&GLOBAL_CTX, cur_ctx)
     }
-    pop(&ctx.thread_ctx.ctx_stack)
+    pop(&THREAD_CTX.ctx_stack)
 }
 
-join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
-    for get_local_ctx(ctx) != local_ctx {
-        join(ctx)
+join_to :: proc(local_ctx: ^Local_Ctx) {
+    for get_local_ctx() != local_ctx {
+        join()
     }
 }
 
@@ -616,30 +481,30 @@ join_to :: proc(ctx: Ctx, local_ctx: ^Local_Ctx) {
 
 Branches_Result :: struct { run: bool, local_ctx: ^Local_Ctx }
 
-branches_end :: proc(ctx: Ctx, br: Branches_Result) {
-    join_to(ctx, br.local_ctx)
+branches_end :: proc(br: Branches_Result) {
+    join_to(br.local_ctx)
 }
 
 @(deferred_in_out=branches_end)
-branches :: proc(ctx: Ctx) -> Branches_Result {
-    return Branches_Result{ true, get_local_ctx(ctx) }
+branches :: proc() -> Branches_Result {
+    return Branches_Result{ true, get_local_ctx() }
 }
 
-// task ////////////////////////////////
+// task ////////////////////////////////////////////////////////////////////////
 
-task :: proc(ctx: Ctx, thread_count: int, comm: ^Comm($I), self: $T, exec: proc(ctx: Ctx, self: T, input: I)) -> (thread_continue: bool) {
-    if branch(ctx, thread_count) {
+task :: proc(thread_count: int, comm: ^Comm($I), self: $T, exec: proc(self: T, input: I)) -> (thread_continue: bool) {
+    if branch(thread_count) {
         for {
             data := type_comm_recv(comm) or_break
-            exec(ctx, self, data)
+            exec(self, data)
         }
         return false
     }
     return true
 }
 
-task_shutdown :: proc(ctx: Ctx, comm: ^Comm($I)) {
-    if single(ctx) {
+task_shutdown :: proc(comm: ^Comm($I)) {
+    if single() {
         comm_set_closed(comm)
     }
 }
@@ -647,7 +512,7 @@ task_shutdown :: proc(ctx: Ctx, comm: ^Comm($I)) {
 tasks :: branches
 task_send :: comm_send
 
-// messages ////////////////////////////
+// messages ////////////////////////////////////////////////////////////////////
 
 //
 // A negative thread index will be treated as a ~global thread id. When threads
@@ -656,34 +521,34 @@ task_send :: comm_send
 //
 
 @(private)
-get_thread_ctx_by_local_index :: #force_inline proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, index: int) -> ^Thread_Ctx {
-    return &ctx.global_ctx.thread_ctxs[shared_ctx.thread_index_offset + index]
+get_thread_ctx_by_local_index :: proc(shared_ctx: ^Shared_Ctx, index: int) -> ^Thread_Ctx {
+    return &GLOBAL_CTX.thread_ctxs[shared_ctx.thread_index_offset + index]
 }
 
-send_data_parallel_ctx_data :: proc(ctx: Ctx, thread_index: int, data: Data, channel := 0) {
-    shared_ctx := get_local_ctx(ctx).shared_ctx
+send_data_parallel_ctx_data :: proc(thread_index: int, data: Data, channel := 0) {
+    shared_ctx := get_local_ctx().shared_ctx
     if thread_index >= 0 {
-        receiver_data := get_thread_ctx_by_local_index(ctx, shared_ctx, thread_index)
-        comm_send(&receiver_data.comm, Message(Data){get_thread_index(ctx), data}, channel)
+        receiver_data := get_thread_ctx_by_local_index(shared_ctx, thread_index)
+        comm_send(&receiver_data.comm, Message(Data){get_thread_index(), data}, channel)
     } else {
-        receiver_data := &ctx.global_ctx.thread_ctxs[~thread_index]
-        comm_send(&receiver_data.comm, Message(Data){~get_thread_id(ctx), data}, channel)
+        receiver_data := &GLOBAL_CTX.thread_ctxs[~thread_index]
+        comm_send(&receiver_data.comm, Message(Data){~get_thread_id(), data}, channel)
     }
 }
 
-send_data_parallel_ctx_poly :: proc(ctx: Ctx, thread_index: int, data: ^$T, channel := 0) {
-    send_data_parallel_ctx_data(ctx, thread_index, make_data(data), channel)
+send_data_parallel_ctx_poly :: proc(thread_index: int, data: $T, channel := 0) {
+    send_data_parallel_ctx_data(thread_index, make_data(data), channel)
 }
 
-send_data_shared_ctx_data :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
-    assert(shared_ctx != get_local_ctx(ctx).shared_ctx)
+send_data_shared_ctx_data :: proc(shared_ctx: ^Shared_Ctx, thread_index: int, data: Data, channel := 0) {
+    assert(shared_ctx != get_local_ctx().shared_ctx)
     assert(thread_index >= 0)
-    receiver_data := get_thread_ctx_by_local_index(ctx, shared_ctx, thread_index)
-    comm_send(&receiver_data.comm, Message(Data){~get_thread_id(ctx), data}, channel)
+    receiver_data := get_thread_ctx_by_local_index(shared_ctx, thread_index)
+    comm_send(&receiver_data.comm, Message(Data){~get_thread_id(), data}, channel)
 }
 
-send_data_shared_ctx_poly :: proc(ctx: Ctx, shared_ctx: ^Shared_Ctx, thread_index: int, data: ^$T, channel := 0) {
-    send_data_shared_ctx_data(ctx, shared_ctx, thread_index, make_data(data), channel)
+send_data_shared_ctx_poly :: proc(shared_ctx: ^Shared_Ctx, thread_index: int, data: $T, channel := 0) {
+    send_data_shared_ctx_data(shared_ctx, thread_index, make_data(data), channel)
 }
 
 send_data :: proc{
@@ -693,13 +558,13 @@ send_data :: proc{
     send_data_shared_ctx_poly,
 }
 
-recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    msg, ok := comm_recv(&ctx.thread_ctx.comm, channel)
+recv_data_data :: proc(channel := ANY_CHANNEL) -> (Data, int, bool) {
+    msg, ok := comm_recv(&THREAD_CTX.comm, channel)
     return msg.content, msg.sender_index, ok
 }
 
-recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int, bool) {
-    if data, sender_index, ok := recv_data_data(ctx, channel); ok {
+recv_data_poly :: proc($T: typeid, channel := ANY_CHANNEL) -> (^T, int, bool) {
+    if data, sender_index, ok := recv_data_data(channel); ok {
         return data_ptr(data, T), sender_index, ok
     }
     return nil, 0, false
@@ -707,16 +572,42 @@ recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int
 
 recv_data :: proc{ recv_data_data, recv_data_poly }
 
-try_recv_data_data :: proc(ctx: Ctx, channel := ANY_CHANNEL) -> (Data, int, bool) {
-    msg, ok := comm_try_recv(&ctx.thread_ctx.comm, channel)
+try_recv_data_data :: proc(channel := ANY_CHANNEL) -> (Data, int, bool) {
+    msg, ok := comm_try_recv(&THREAD_CTX.comm, channel)
     return msg.content, msg.sender_index, ok
 }
 
-try_recv_data_poly :: proc(ctx: Ctx, $T: typeid, channel := ANY_CHANNEL) -> (^T, int, bool) {
-    if data, sender_index, ok := try_recv_data_data(ctx, channel); ok {
+try_recv_data_poly :: proc($T: typeid, channel := ANY_CHANNEL) -> (^T, int, bool) {
+    if data, sender_index, ok := try_recv_data_data(channel); ok {
         return data_ptr(data, T), sender_index, ok
     }
     return nil, 0, false
 }
 
 try_recv_data :: proc{ try_recv_data_data, try_recv_data_poly }
+
+// Data ////////////////////////////////////////////////////////////////////////
+
+Data :: struct {
+    type: typeid,
+    val: rawptr,
+}
+
+data_val :: proc(data: Data, $T: typeid) -> T {
+    when ODIN_DEBUG {
+        if data.type != T do panic("tried to unpack data from the wrong type")
+    }
+    return cast(T)data.val
+}
+
+data_ptr :: proc(data: Data, $T: typeid) -> ^T {
+    return data_val(data, ^T)
+}
+
+data_type :: proc(data: Data) -> typeid {
+    return data.type
+}
+
+make_data :: proc(data: $T) -> Data {
+    return Data{T, cast(rawptr)data}
+}

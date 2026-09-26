@@ -4,16 +4,6 @@ import "core:sync"
 import "base:intrinsics"
 import "core:mem"
 import "core:fmt"
-SPIN_BACKOFF_INIT :: 1
-SPIN_BACKOFF_MAX :: 64
-
-@(private)
-spin_backoff :: #force_inline proc(count: ^int) {
-    for _ in 0..<count^ {
-        intrinsics.cpu_relax()
-    }
-    count^ = min(count^ * 2, SPIN_BACKOFF_MAX)
-}
 
 // Barriers ////////////////////////////////////////////////////////////////////
 
@@ -38,9 +28,10 @@ spin_barrier_wait :: proc(barrier: ^SpinBarrier) {
         sync.atomic_add_explicit(&barrier.generation, 1, .Release)
         return
     }
-    backoff := SPIN_BACKOFF_INIT
     for sync.atomic_load_explicit(&barrier.generation, .Acquire) == gen {
-        spin_backoff(&backoff)
+        for _ in 0..<16 {
+            intrinsics.cpu_relax()
+        }
     }
 }
 
@@ -70,10 +61,6 @@ barrier_wait :: proc(barrier: ^Barrier, kind := BarrierKind.Sleep) {
 // Remote barrier //////////////////////////////////////////////////////////////
 
 // TODO: barrier controllable from another thread
-
-// First & Last ////////////////////////////////////////////////////////////////
-
-// TODO: run something by the first thread or the last thread to reach a checkpoint
 
 // Index loop //////////////////////////////////////////////////////////////////
 
@@ -120,91 +107,4 @@ index_loop_step :: proc(loop: ^Index_Loop, index: ^int = nil) -> bool {
         sync.wait(&loop.cond, &loop.mutex)
     }
     return true
-}
-
-// Job /////////////////////////////////////////////////////////////////////////
-
-Job :: struct {
-    mutex: sync.Mutex,
-    cond: sync.Cond,
-    work_count: int,
-}
-
-job_init :: proc(job: ^Job, work_count := 1) {
-    job.work_count = work_count
-}
-
-job_reset :: proc(job: ^Job, work_count := 1) {
-    sync.guard(&job.mutex)
-    job.work_count = work_count
-}
-
-job_complete_work :: proc(job: ^Job, work_count := 1) -> (done: bool) {
-    sync.lock(&job.mutex)
-    job.work_count = max(0, job.work_count - work_count)
-    done = (job.work_count == 0)
-    sync.unlock(&job.mutex)
-    if done do sync.broadcast(&job.cond)
-    return done
-}
-
-job_add_work :: proc(job: ^Job, work_count := 1) {
-    sync.lock(&job.mutex)
-    job.work_count += work_count
-    sync.unlock(&job.mutex)
-    if work_count == 1 {
-        sync.signal(&job.cond)
-    } else {
-        sync.broadcast(&job.cond)
-    }
-}
-
-job_is_done :: proc(job: ^Job) -> bool {
-    sync.guard(&job.mutex)
-    return job.work_count == 0
-}
-
-job_wait_completion :: proc(job: ^Job) {
-    sync.guard(&job.mutex)
-    for job.work_count > 0 {
-        sync.wait(&job.cond, &job.mutex)
-    }
-}
-
-job_wait_update :: proc(job: ^Job) -> bool {
-    sync.guard(&job.mutex)
-    work_count := job.work_count
-    for job.work_count == work_count && job.work_count > 0 {
-        sync.wait(&job.cond, &job.mutex)
-    }
-    return job.work_count == 0
-}
-
-Comm_Job :: struct($T: typeid) {
-    using job: Job,
-    comm: Comm(T),
-}
-
-comm_job_init :: proc(job: ^Comm_Job($T), work_count := 1, allocator := context.allocator) {
-    job_init(job, work_count)
-    comm_init(&job.comm)
-}
-
-comm_job_destroy :: proc(job: ^Comm_Job($T)) {
-    comm_destroy(&job.comm)
-}
-
-comm_job_send :: proc(job: ^Comm_Job($T), data: T) {
-    comm_send(&job.comm, data)
-}
-
-comm_job_recv :: proc(job: ^Comm_Job($T)) -> T {
-    data, ok := comm_recv(&job.comm)
-    ensure(ok, "communicator should not be closed for jobs")
-    return data
-}
-
-comm_job_try_recv :: proc(job: ^Comm_Job($T)) -> (T, bool) {
-    data, ok := comm_try_recv(&job.comm)
-    return data, ok
 }
